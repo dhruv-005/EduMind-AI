@@ -1,0 +1,9 @@
+name,brand,category,price,description,features,rating,in_stock
+Dell XPS 15,Dell,Laptops,1299.99,Premium laptop for professionals,"15.6 inch display,Intel i7,16GB RAM,512GB SSD,Backlit keyboard",4.8,True
+MacBook Pro 14,Apple,Laptops,1999.99,Apple professional laptop,"14 inch Retina display,M3 chip,16GB RAM,512GB SSD",4.9,True
+HP Pavilion 15,HP,Laptops,699.99,Affordable everyday laptop,"15.6 inch display,Intel i5,8GB RAM,256GB SSD",4.2,True
+Samsung Galaxy S24,Samsung,Smartphones,899.99,Flagship Android phone,"6.2 inch AMOLED,200MP camera,5G,256GB storage",4.7,True
+iPhone 15 Pro,Apple,Smartphones,1099.99,Apple flagship smartphone,"6.1 inch Super Retina,48MP camera,A17 Pro chip,256GB",4.8,True
+Sony WH-1000XM5,Sony,Headphones,349.99,Noise cancelling headphones,"30hr battery,ANC,Bluetooth 5.2,Hi-Res Audio",4.9,True
+Bose QuietComfort 45,Bose,Headphones,279.99,Premium wireless headphones,"24hr battery,ANC,Bluetooth,Foldable design",4.7,True
+LG OLED C3,LG,TVs,1499.99,OLED 4K Smart TV,"55 inch OLED,4K 120Hz,webOS,Dolby Vision",4.8,True

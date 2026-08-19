@@ -1,0 +1,26 @@
+[
+  {
+    "question": "What is photosynthesis?",
+    "reference_answer": "Photosynthesis is the process by which plants use sunlight, water, and carbon dioxide to produce oxygen and energy in the form of glucose sugar.",
+    "student_answer": "Photosynthesis is when plants make food using sunlight and water.",
+    "subject": "science",
+    "grade_level": "Grade 8",
+    "expected_score_range": [5, 8]
+  },
+  {
+    "question": "Solve: 2x + 5 = 13",
+    "reference_answer": "2x + 5 = 13, so 2x = 8, therefore x = 4",
+    "student_answer": "x = 4",
+    "subject": "mathematics",
+    "grade_level": "Grade 7",
+    "expected_score_range": [6, 9]
+  },
+  {
+    "question": "What is Newton's First Law of Motion?",
+    "reference_answer": "Newton's First Law states that an object at rest stays at rest, and an object in motion stays in motion with the same speed and direction, unless acted upon by an external force.",
+    "student_answer": "Things keep moving unless something stops them.",
+    "subject": "science",
+    "grade_level": "Grade 9",
+    "expected_score_range": [4, 7]
+  }
+]

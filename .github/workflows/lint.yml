@@ -1,0 +1,34 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install flake8
+        run: pip install flake8
+      - name: Lint
+        run: |
+          cd backend
+          flake8 app/ --max-line-length=100 --ignore=E501,W503 || true
+
+  lint-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install
+        run: cd frontend && npm install
+      - name: Lint
+        run: cd frontend && npm run lint || true

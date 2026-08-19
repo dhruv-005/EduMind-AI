@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: edumind-ai-backend
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: APP_NAME
+        value: EduMind AI
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: false
+      - key: TRANSFORMERS_OFFLINE
+        value: 1
+      - key: HF_DATASETS_OFFLINE
+        value: 1
+      - key: PYTHON_VERSION
+        value: 3.11.0

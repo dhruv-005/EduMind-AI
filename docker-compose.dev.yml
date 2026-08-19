@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./edumind.db
+      - REDIS_URL=redis://redis:6379
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - JWT_SECRET=dev-jwt-secret
+      - SECRET_KEY=dev-secret-key
+      - DEBUG=True
+    volumes:
+      - ./backend:/app
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      - redis
+    command: uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  redis_data:

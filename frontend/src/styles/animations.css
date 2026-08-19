@@ -1,0 +1,248 @@
+/* ============================================================
+   EDUMIND AI — ANIMATIONS & KEYFRAMES
+   ============================================================ */
+
+/* ── RADAR SWEEP ────────────────────────────────────────────── */
+@keyframes radarSweep {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ── PULSE DOT ──────────────────────────────────────────────── */
+@keyframes pulseDot {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 6px var(--term-green);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.75);
+    box-shadow: 0 0 2px var(--term-green);
+  }
+}
+
+/* ── MARQUEE SCROLL ─────────────────────────────────────────── */
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+/* ── BLINK CURSOR ───────────────────────────────────────────── */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* ── SCAN LINE ──────────────────────────────────────────────── */
+@keyframes scanLine {
+  0%   { transform: translateY(-100%); opacity: 0; }
+  10%  { opacity: 0.4; }
+  90%  { opacity: 0.4; }
+  100% { transform: translateY(100vh); opacity: 0; }
+}
+
+/* ── FADE IN UP ─────────────────────────────────────────────── */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── FADE IN ────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ── SLIDE IN LEFT ──────────────────────────────────────────── */
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* ── SLIDE IN RIGHT ─────────────────────────────────────────── */
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* ── COUNTER COUNT UP ───────────────────────────────────────── */
+@keyframes countUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── GLITCH ─────────────────────────────────────────────────── */
+@keyframes glitch {
+  0%   { text-shadow: none; transform: none; }
+  2%   { text-shadow: 3px 0 var(--accent-primary); transform: translateX(-2px); }
+  4%   { text-shadow: -3px 0 var(--accent-cyber); transform: translateX(2px); }
+  6%   { text-shadow: none; transform: none; }
+  100% { text-shadow: none; transform: none; }
+}
+
+/* ── FLOAT ──────────────────────────────────────────────────── */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-8px); }
+}
+
+/* ── SHIMMER SKELETON ───────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── SPIN ───────────────────────────────────────────────────── */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── EXPAND WIDTH ───────────────────────────────────────────── */
+@keyframes expandWidth {
+  from { width: 0%; }
+  to   { width: var(--target-width, 100%); }
+}
+
+/* ── TYPE WRITER ────────────────────────────────────────────── */
+@keyframes typeWriter {
+  from { width: 0; }
+  to   { width: 100%; }
+}
+
+/* ── GLOW PULSE ─────────────────────────────────────────────── */
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 5px var(--accent-cyber); }
+  50%       { box-shadow: 0 0 20px var(--accent-cyber), 0 0 40px var(--accent-cyber-dim); }
+}
+
+/* ── RADAR PING ─────────────────────────────────────────────── */
+@keyframes radarPing {
+  0% {
+    transform: scale(0.5);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(3);
+    opacity: 0;
+  }
+}
+
+/* ── ANIMATION UTILITY CLASSES ──────────────────────────────── */
+.animate-fade-in-up {
+  animation: fadeInUp 0.5s ease forwards;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease forwards;
+}
+
+.animate-slide-left {
+  animation: slideInLeft 0.4s ease forwards;
+}
+
+.animate-slide-right {
+  animation: slideInRight 0.4s ease forwards;
+}
+
+.animate-glitch {
+  animation: glitch 4s ease-in-out infinite;
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+.animate-blink {
+  animation: blink 1s step-end infinite;
+}
+
+.animate-scan {
+  animation: scanLine 4s ease-in-out infinite;
+}
+
+.animate-glow {
+  animation: glowPulse 2s ease-in-out infinite;
+}
+
+/* Stagger delays */
+.delay-100 { animation-delay: 0.1s; }
+.delay-200 { animation-delay: 0.2s; }
+.delay-300 { animation-delay: 0.3s; }
+.delay-400 { animation-delay: 0.4s; }
+.delay-500 { animation-delay: 0.5s; }
+.delay-700 { animation-delay: 0.7s; }
+.delay-1000 { animation-delay: 1s; }
+
+/* Radar sweep element */
+.radar-sweep {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 50%;
+  height: 2px;
+  transform-origin: 0 0;
+  animation: radarSweep 6s linear infinite;
+  pointer-events: none;
+}
+
+/* Scan line overlay */
+.scan-line-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--accent-cyber),
+    transparent
+  );
+  opacity: 0.3;
+  animation: scanLine 4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* Cursor blink */
+.cursor::after {
+  content: '_';
+  animation: blink 1s step-end infinite;
+  color: var(--accent-primary);
+}
+
+/* Typewriter text */
+.typewriter {
+  overflow: hidden;
+  white-space: nowrap;
+  border-right: 2px solid var(--accent-primary);
+  animation:
+    typeWriter 3s steps(40) forwards,
+    blink 0.75s step-end infinite;
+}
+
+/* Radar ping */
+.radar-ping {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid var(--accent-primary);
+  animation: radarPing 2s ease-out infinite;
+}
