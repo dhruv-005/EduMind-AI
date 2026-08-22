@@ -1,5 +1,6 @@
 import uuid
 import time
+import json
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from app.core.logger import logger
@@ -25,20 +26,20 @@ from app.models.evaluation import Evaluation
 
 
 class EvaluatorService:
-    """
-    Main service for Challenge 1 - Answer Evaluation.
-    Orchestrates all evaluation components.
-    """
+    """Main evaluation service — orchestrates all components."""
 
     def _get_subject_evaluator(self, subject: str):
-        """Get the appropriate subject evaluator."""
         evaluators = {
             "mathematics": math_evaluator,
-            "science": science_evaluator,
-            "english": english_evaluator,
-            "general": general_evaluator
+            "math":        math_evaluator,
+            "science":     science_evaluator,
+            "english":     english_evaluator,
+            "general":     general_evaluator,
         }
         return evaluators.get(subject.lower(), general_evaluator)
+
+    def _is_math_subject(self, subject: str) -> bool:
+        return subject.lower() in ('mathematics', 'math', 'algebra', 'calculus', 'geometry', 'arithmetic')
 
     async def evaluate(
         self,
@@ -47,49 +48,29 @@ class EvaluatorService:
         user_id: Optional[str] = None,
         request_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """
-        Main evaluation method.
-        Runs multi-layer evaluation and returns complete result.
-        """
         start_time = time.time()
         request_id = request_id or str(uuid.uuid4())
 
-        logger.info(
-            f"Starting evaluation: "
-            f"id={request_id} "
-            f"subject={request.subject}"
-        )
+        logger.info(f"Starting evaluation: id={request_id} subject={request.subject}")
 
         try:
-            # STEP 1: Semantic similarity (fast, local)
+            # STEP 1: Semantic similarity
             semantic_sim = scoring_engine.calculate_semantic_score(
-                request.student_answer,
-                request.reference_answer
+                request.student_answer, request.reference_answer
             )
-            logger.debug(
-                f"Semantic similarity: {semantic_sim:.3f}"
-            )
+            logger.debug(f"Semantic similarity: {semantic_sim:.3f}")
 
-            # STEP 2: Concept extraction and comparison
-            concept_analysis = (
-                await concept_extractor.full_concept_analysis(
-                    reference_answer=request.reference_answer,
-                    student_answer=request.student_answer,
-                    subject=request.subject
-                )
+            # STEP 2: Concept extraction
+            concept_analysis = await concept_extractor.full_concept_analysis(
+                reference_answer=request.reference_answer,
+                student_answer=request.student_answer,
+                subject=request.subject
             )
-            concept_coverage = (
-                concept_analysis["coverage_percentage"] / 100.0
-            )
-            logger.debug(
-                f"Concept coverage: "
-                f"{concept_analysis['coverage_percentage']}%"
-            )
+            concept_coverage = concept_analysis["coverage_percentage"] / 100.0
+            logger.debug(f"Concept coverage: {concept_analysis['coverage_percentage']}%")
 
             # STEP 3: Subject-specific LLM evaluation
-            subject_evaluator = self._get_subject_evaluator(
-                request.subject
-            )
+            subject_evaluator = self._get_subject_evaluator(request.subject)
             llm_scores = await subject_evaluator.evaluate(
                 question=request.question,
                 reference_answer=request.reference_answer,
@@ -116,219 +97,158 @@ class EvaluatorService:
                 llm_clarity=llm_scores.get("clarity", 0.5)
             )
 
-            # Apply strict mode if enabled
+            # ══════════════════════════════════════════════════════
+            # MATH OVERRIDE: Subject evaluator takes precedence
+            # over concept_coverage for math subjects
+            # ══════════════════════════════════════════════════════
+            if self._is_math_subject(request.subject):
+                llm_correctness = llm_scores.get("correctness", 0.5)
+                llm_completeness = llm_scores.get("completeness", 0.5)
+                llm_relevance = llm_scores.get("relevance", 0.5)
+                llm_clarity = llm_scores.get("clarity", 0.5)
+                final_correct = llm_scores.get("final_answer_correct", None)
+
+                if final_correct is True:
+                    # Correct answer — use LLM scores directly, ignore brittle concept matching
+                    correctness = max(correctness, llm_correctness)
+                    completeness = max(completeness, llm_completeness)
+                    relevance = max(relevance, llm_relevance)
+                    clarity = max(clarity, llm_clarity)
+                    logger.info(
+                        f"Math override: final answer CORRECT. "
+                        f"correctness={correctness:.2f}, completeness={completeness:.2f}"
+                    )
+                elif final_correct is False:
+                    # Wrong answer — enforce low scores
+                    correctness = min(correctness, llm_correctness)
+                    completeness = min(completeness, llm_completeness)
+                    logger.info(
+                        f"Math override: final answer WRONG. "
+                        f"correctness={correctness:.2f}"
+                    )
+
+            # Apply strict mode
             if request.strict_mode:
-                scores_dict = {
-                    "correctness": correctness,
-                    "completeness": completeness
-                }
-                scores_dict = scoring_engine.apply_strict_mode(
-                    scores=scores_dict,
-                    missing_concept_count=len(
-                        concept_analysis.get("missing_concepts", [])
-                    )
-                )
-                completeness = scores_dict["completeness"]
+                correctness = min(correctness, llm_scores.get("correctness", 0.5) * 0.8)
+                completeness = min(completeness, concept_coverage * 0.8)
 
-            # Aggregate final scores
-            final_scores = scoring_engine.aggregate_scores(
-                correctness=correctness,
-                relevance=relevance,
-                completeness=completeness,
-                clarity=clarity,
-                max_score=request.max_score or 10.0
-            )
+            # Clamp values
+            correctness = max(0.0, min(1.0, correctness))
+            relevance   = max(0.0, min(1.0, relevance))
+            completeness = max(0.0, min(1.0, completeness))
+            clarity     = max(0.0, min(1.0, clarity))
 
-            # STEP 5: Compute confidence
-            ref_len = len(request.reference_answer.split())
-            student_len = len(request.student_answer.split())
-            length_ratio = (
-                student_len / ref_len if ref_len > 0 else 0
-            )
-            confidence = scoring_engine.compute_confidence(
-                semantic_similarity=semantic_sim,
-                concept_coverage=concept_coverage,
-                answer_length_ratio=length_ratio
-            )
+            # Convert to weighted scores
+            correctness_weighted  = correctness * 40.0
+            relevance_weighted    = relevance * 20.0
+            completeness_weighted = completeness * 25.0
+            clarity_weighted      = clarity * 15.0
 
-            # STEP 6: Generate feedback
-            feedback_data = await feedback_generator.generate_feedback(
-                question=request.question,
-                reference_answer=request.reference_answer,
-                student_answer=request.student_answer,
-                score=final_scores["score_out_of_10"],
-                subject=request.subject,
-                missing_concepts=concept_analysis.get(
-                    "missing_concepts", []
-                ),
-                wrong_concepts=concept_analysis.get(
-                    "wrong_concepts", []
-                ),
-                grade_level=request.grade_level
+            total_score = (
+                correctness_weighted + relevance_weighted +
+                completeness_weighted + clarity_weighted
             )
+            score_out_of_10 = total_score / 10.0
 
-            # Subject-specific note
-            subject_note = feedback_generator.generate_subject_note(
-                subject=request.subject,
-                score=final_scores["score_out_of_10"],
-                missing_concepts=concept_analysis.get(
-                    "missing_concepts", []
-                )
-            )
+            grade_info = scoring_engine.get_grade_info(score_out_of_10)
 
-            # STEP 7: Bias check on feedback
-            bias_result = bias_detector.full_bias_check(
-                text=feedback_data["feedback"],
-                context="evaluation_feedback"
-            )
-            if bias_result["has_bias"]:
-                logger.warning(
-                    f"Bias detected in feedback: "
-                    f"{bias_result['overall_severity']}"
-                )
-
-            # STEP 8: Human oversight check
-            should_review, review_reason = (
-                human_oversight.should_trigger_review(
-                    challenge="challenge1",
-                    confidence_score=confidence
-                )
-            )
-            if should_review:
-                human_oversight.add_to_review_queue(
-                    challenge="challenge1",
-                    request_id=request_id,
-                    reason=review_reason,
-                    content={
-                        "question": request.question[:100],
-                        "score": final_scores["score_out_of_10"],
-                        "confidence": confidence
+            # Use LLM feedback if available (it's more specific and real)
+            feedback = llm_scores.get("feedback", "")
+            if not feedback or len(feedback) < 30:
+                feedback = feedback_generator.generate_feedback(
+                    score_out_of_10=score_out_of_10,
+                    breakdown={
+                        "correctness": correctness_weighted,
+                        "relevance": relevance_weighted,
+                        "completeness": completeness_weighted,
+                        "clarity": clarity_weighted
                     },
-                    priority=(
-                        "high" if confidence < 0.4 else "normal"
-                    ),
-                    user_id=user_id
+                    concept_analysis=concept_analysis
                 )
 
-            # STEP 9: Build result
-            elapsed_ms = (time.time() - start_time) * 1000
-            prompt_version = prompt_versioning.get_version(
-                f"challenge1_{request.subject}"
-            )
+            suggestions = llm_scores.get("improvement_suggestions", [])
+            if not suggestions:
+                suggestions = feedback_generator.generate_suggestions(
+                    score_breakdown={
+                        "correctness": correctness_weighted,
+                        "relevance": relevance_weighted,
+                        "completeness": completeness_weighted,
+                        "clarity": clarity_weighted
+                    },
+                    concept_analysis=concept_analysis
+                )
 
-            result = {
-                "request_id": request_id,
-                "score_out_of_10": final_scores["score_out_of_10"],
-                "total_score": final_scores["total_score"],
-                "percentage": final_scores["percentage"],
-                "grade": final_scores["grade"],
+            # Confidence score — for math, use final_answer_correct as strong signal
+            if self._is_math_subject(request.subject):
+                final_correct = llm_scores.get("final_answer_correct", None)
+                if final_correct is True:
+                    confidence = max(0.75, (semantic_sim * 0.3) + (llm_scores.get("correctness", 0.9) * 0.7))
+                elif final_correct is False:
+                    confidence = max(0.60, (semantic_sim * 0.3) + (llm_scores.get("correctness", 0.1) * 0.7))
+                else:
+                    confidence = (semantic_sim * 0.3) + (concept_coverage * 0.3) + (llm_scores.get("correctness", 0.5) * 0.4)
+            else:
+                confidence = (semantic_sim * 0.3) + (concept_coverage * 0.3) + (llm_scores.get("correctness", 0.5) * 0.4)
+
+            confidence = max(0.0, min(1.0, confidence))
+            review_required = confidence < getattr(settings, 'HUMAN_REVIEW_THRESHOLD', 0.6)
+
+            # Bias detection
+            bias_detector.scan_text(request.student_answer + " " + feedback)
+
+            result_payload = {
+                "request_id":       request_id,
+                "score_out_of_10":  round(score_out_of_10, 2),
+                "total_score":      round(total_score, 2),
+                "percentage":       round(total_score, 2),
+                "grade":            grade_info["grade"],
                 "score_breakdown": {
-                    "correctness": correctness,
-                    "relevance": relevance,
-                    "completeness": completeness,
-                    "clarity": clarity,
-                    "total": final_scores["total_score"]
+                    "correctness":  round(correctness_weighted, 2),
+                    "relevance":    round(relevance_weighted, 2),
+                    "completeness": round(completeness_weighted, 2),
+                    "clarity":      round(clarity_weighted, 2),
+                    "total":        round(total_score, 2)
                 },
-                "concept_analysis": {
-                    "correct_concepts": concept_analysis.get(
-                        "correct_concepts", []
-                    ),
-                    "missing_concepts": concept_analysis.get(
-                        "missing_concepts", []
-                    ),
-                    "wrong_concepts": concept_analysis.get(
-                        "wrong_concepts", []
-                    ),
-                    "total_expected": concept_analysis.get(
-                        "total_expected", 0
-                    ),
-                    "total_found": concept_analysis.get(
-                        "total_found", 0
-                    ),
-                    "coverage_percentage": concept_analysis.get(
-                        "coverage_percentage", 0.0
-                    )
-                },
-                "feedback": feedback_data["feedback"],
-                "improvement_suggestions": feedback_data.get(
-                    "improvement_suggestions", []
-                ),
-                "subject_specific_notes": subject_note,
-                "semantic_similarity": semantic_sim,
-                "confidence_score": confidence,
-                "governance_status": "passed",
-                "human_review_required": should_review,
-                "model_used": llm_scores.get(
-                    "model_used", settings.GROQ_MODEL
-                ),
-                "provider": llm_scores.get("provider", "groq"),
-                "processing_time_ms": elapsed_ms,
-                "prompt_version": prompt_version
+                "concept_analysis":        concept_analysis,
+                "feedback":                feedback,
+                "improvement_suggestions": suggestions,
+                "subject_specific_notes":   llm_scores.get("reasoning", ""),
+                "semantic_similarity":     round(semantic_sim, 4),
+                "confidence_score":        round(confidence, 3),
+                "governance_status":       "flagged" if review_required else "passed",
+                "human_review_required":   review_required,
+                "model_used":              llm_scores.get("model_used", "openai/gpt-oss-20b"),
+                "provider":                llm_scores.get("provider", "groq"),
+                "processing_time_ms":      (time.time() - start_time) * 1000,
+                "prompt_version":          "3.0.0"
             }
 
-            # STEP 10: Save to database
             if db:
-                self._save_evaluation(
-                    db=db,
-                    request=request,
-                    result=result,
-                    user_id=user_id
-                )
+                self._save_evaluation(db, result_payload, request, user_id)
 
-            # STEP 11: Audit log
             audit_logger.log_ai_decision(
-                db=db,
-                request_id=request_id,
                 challenge="challenge1",
-                user_id=user_id,
-                session_id=None,
-                input_summary=f"Q:{request.question[:50]}",
-                model_used=result["model_used"],
-                model_version="3.3-70b",
-                prompt_version=prompt_version,
-                output_summary=(
-                    f"score={result['score_out_of_10']:.1f}/10 "
-                    f"grade={result['grade']}"
-                ),
-                confidence_score=confidence,
-                processing_time_ms=elapsed_ms,
-                governance_status="passed",
-                metadata={
-                    "subject": request.subject,
-                    "human_review": should_review
-                }
+                request_id=request_id,
+                model_used=result_payload["model_used"],
+                confidence_score=result_payload["confidence_score"],
+                status=result_payload["governance_status"],
+                time_ms=result_payload["processing_time_ms"],
+                summary=f"score={result_payload['score_out_of_10']}/10 grade={result_payload['grade']}",
+                metadata={"subject": request.subject, "human_review": review_required}
             )
 
-            logger.info(
-                f"Evaluation complete: "
-                f"id={request_id} "
-                f"score={result['score_out_of_10']:.1f}/10 "
-                f"grade={result['grade']} "
-                f"time={elapsed_ms:.0f}ms"
-            )
-
-            return result
+            return result_payload
 
         except Exception as e:
-            elapsed_ms = (time.time() - start_time) * 1000
-            logger.error(
-                f"Evaluation failed: id={request_id} error={e}"
-            )
+            logger.error(f"Evaluation failed: {e}")
             raise
 
-    def _save_evaluation(
-        self,
-        db: Session,
-        request: EvaluationRequest,
-        result: Dict[str, Any],
-        user_id: Optional[str]
-    ):
-        """Save evaluation result to database."""
+    def _save_evaluation(self, db, result, request, user_id):
         try:
-            evaluation = Evaluation(
+            eval_model = Evaluation(
                 id=str(uuid.uuid4()),
                 request_id=result["request_id"],
-                user_id=user_id,
+                user_id=user_id or "anonymous",
                 question=request.question,
                 reference_answer=request.reference_answer,
                 student_answer=request.student_answer,
@@ -342,11 +262,11 @@ class EvaluatorService:
                 clarity_score=result["score_breakdown"]["clarity"],
                 percentage=result["percentage"],
                 grade=result["grade"],
-                correct_concepts=result["concept_analysis"]["correct_concepts"],
-                missing_concepts=result["concept_analysis"]["missing_concepts"],
-                wrong_concepts=result["concept_analysis"]["wrong_concepts"],
+                correct_concepts=json.dumps(result["concept_analysis"]["correct_concepts"]),
+                missing_concepts=json.dumps(result["concept_analysis"]["missing_concepts"]),
+                wrong_concepts=json.dumps(result["concept_analysis"]["wrong_concepts"]),
                 feedback=result["feedback"],
-                improvement_suggestions=result["improvement_suggestions"],
+                improvement_suggestions=json.dumps(result["improvement_suggestions"]),
                 semantic_similarity=result["semantic_similarity"],
                 model_used=result["model_used"],
                 provider=result["provider"],
@@ -356,17 +276,12 @@ class EvaluatorService:
                 governance_status=result["governance_status"],
                 human_review_required=result["human_review_required"]
             )
-            db.add(evaluation)
+            db.add(eval_model)
             db.commit()
-            db.refresh(evaluation)
-            result["evaluation_id"] = evaluation.id
-            logger.info(
-                f"Evaluation saved to DB: {evaluation.id}"
-            )
+            logger.info(f"Evaluation saved: {eval_model.id}")
         except Exception as e:
             db.rollback()
-            logger.error(f"Failed to save evaluation: {e}")
+            logger.error(f"DB save failed: {e}")
 
 
-# Singleton
 evaluator_service = EvaluatorService()

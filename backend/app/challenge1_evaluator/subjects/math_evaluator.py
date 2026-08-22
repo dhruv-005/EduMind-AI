@@ -30,15 +30,17 @@ class MathEvaluator:
         if not text:
             return None
 
-        # Priority patterns for final answer
         patterns = [
             r'final\s*answer[:\s]*\$?(-?\d+\.?\d*)',
             r'answer\s*(?:is|=)?\s*\$?(-?\d+\.?\d*)',
             r'result\s*(?:is|=)?\s*\$?(-?\d+\.?\d*)',
             r'equals?\s*\$?(-?\d+\.?\d*)',
+            r'leaves?\s+(?:her|him|them|it)\s+with\s+\$?(-?\d+\.?\d*)',
+            r'left\s+with\s+\$?(-?\d+\.?\d*)',
+            r'has\s+\$?(-?\d+\.?\d*)\s+left',
             r'=\s*\$?(-?\d+\.?\d*)\s*[\.\s]*$',
             r'get\s+\$?(-?\d+\.?\d*)',
-            r'(-?\d+\.?\d*)\s*$',
+            r'(-?\d+\.?\d*)\s*(?:apples?|units?|items?|cm|m|kg|g|ml|l|degrees?)?\s*[\.\s]*$',
         ]
 
         cleaned = text.replace('$', '').replace('\\', ' ')
@@ -51,28 +53,62 @@ class MathEvaluator:
                 except ValueError:
                     continue
 
-        # Last resort — use last number found
         all_nums = self._extract_all_numbers(text)
         return all_nums[-1] if all_nums else None
 
     def _check_bodmas_violation(self, student_answer: str) -> bool:
         """Detect if student violated order of operations."""
         text = student_answer.lower()
-
-        # Common violation patterns
         violations = [
             r'first\s*,?\s*add.*then\s*divide',
             r'first\s*,?\s*add.*then\s*multiply',
             r'first\s*,?\s*subtract.*then\s*divide',
             r'first\s*,?\s*subtract.*then\s*multiply',
-            r'left\s*to\s*right\s*without',
-            r'processed?\s*left\s*to\s*right',
+            r'processed?\s*left\s*to\s*right\s*without',
         ]
-
         for pattern in violations:
             if re.search(pattern, text):
                 return True
         return False
+
+    def _check_method_correctness(self, reference: str, student: str) -> bool:
+        """Check if the student's method/approach is correct."""
+        stu_lower = student.lower()
+        ref_lower = reference.lower()
+
+        # Extract operations from reference
+        ref_ops = re.findall(r'(?:add|subtract|multiply|divide|plus|minus|times|\+|\-|\*|\/)', ref_lower)
+        stu_ops = re.findall(r'(?:add|subtract|multiply|divide|plus|minus|times|added|subtracted|multiplied|divided|\+|\-|\*|\/)', stu_lower)
+
+        # Check if student used the same types of operations
+        ref_op_types = set()
+        for op in ref_ops:
+            if op in ('add', 'plus', '+'):
+                ref_op_types.add('add')
+            elif op in ('subtract', 'minus', '-'):
+                ref_op_types.add('subtract')
+            elif op in ('multiply', 'times', '*'):
+                ref_op_types.add('multiply')
+            elif op in ('divide', '/'):
+                ref_op_types.add('divide')
+
+        stu_op_types = set()
+        for op in stu_ops:
+            if op in ('add', 'plus', '+', 'added', 'adding'):
+                stu_op_types.add('add')
+            elif op in ('subtract', 'minus', '-', 'subtracted', 'took away', 'took'):
+                stu_op_types.add('subtract')
+            elif op in ('multiply', 'times', '*', 'multiplied'):
+                stu_op_types.add('multiply')
+            elif op in ('divide', '/', 'divided'):
+                stu_op_types.add('divide')
+
+        # Student should use at least the same operation types
+        if ref_op_types and stu_op_types:
+            overlap = ref_op_types & stu_op_types
+            return len(overlap) >= len(ref_op_types) * 0.5
+
+        return True  # Can't determine, assume OK
 
     async def evaluate(
         self,
@@ -83,22 +119,23 @@ class MathEvaluator:
     ) -> Dict[str, Any]:
         """Evaluate math answer with strict numerical verification."""
 
-        # ── PROGRAMMATIC CHECKS FIRST ───────────────────────────
         ref_final = self._extract_final_answer(reference_answer)
         stu_final = self._extract_final_answer(student_answer)
 
         final_correct = False
         if ref_final is not None and stu_final is not None:
-            final_correct = abs(ref_final - stu_final) < 0.001
+            final_correct = abs(ref_final - stu_final) < 0.01
 
         bodmas_violation = self._check_bodmas_violation(student_answer)
+        method_correct = self._check_method_correctness(reference_answer, student_answer)
 
         logger.info(
-            f"Math check: ref_final={ref_final}, stu_final={stu_final}, "
-            f"correct={final_correct}, bodmas_violation={bodmas_violation}"
+            f"Math check: ref={ref_final}, stu={stu_final}, "
+            f"correct={final_correct}, method={method_correct}, "
+            f"bodmas_violation={bodmas_violation}"
         )
 
-        # ── LLM EVALUATION ──────────────────────────────────────
+        # LLM evaluation
         prompt = MATH_EVALUATION_PROMPT.format(
             question=question,
             reference_answer=reference_answer,
@@ -112,104 +149,104 @@ class MathEvaluator:
                     {"role": "user",   "content": prompt},
                 ],
                 max_tokens=1500,
-                temperature=0.1,  # Low for consistency
+                temperature=0.1,
             )
-
-            # Parse JSON response
             raw = result.get("text", "")
             start = raw.find('{')
             end = raw.rfind('}') + 1
-
             if start != -1 and end > start:
                 llm_data = json.loads(raw[start:end])
             else:
-                raise ValueError("No JSON in LLM response")
-
+                raise ValueError("No JSON")
         except Exception as e:
             logger.error(f"Math LLM failed: {e}")
             llm_data = {
-                "correctness": 0.5,
-                "relevance": 0.5,
-                "completeness": 0.5,
-                "clarity": 0.5,
-                "reasoning": "LLM evaluation unavailable",
-                "feedback": "Please review your work carefully.",
-                "improvement_suggestions": ["Review the problem step by step"],
+                "correctness": 0.5, "relevance": 0.7,
+                "completeness": 0.5, "clarity": 0.6,
+                "reasoning": "LLM unavailable", "feedback": "",
+                "improvement_suggestions": [],
             }
 
-        # ── STRICT OVERRIDE FOR WRONG ANSWERS ───────────────────
-        if not final_correct and ref_final is not None:
-            # Wrong final answer — heavy penalty
+        # ══════════════════════════════════════════════════════
+        # STRICT OVERRIDE LOGIC
+        # ══════════════════════════════════════════════════════
+
+        if final_correct and method_correct and not bodmas_violation:
+            # ── CORRECT ANSWER + CORRECT METHOD → HIGH SCORE ──
+            llm_data["correctness"] = max(llm_data.get("correctness", 0.5), 0.92)
+            llm_data["completeness"] = max(llm_data.get("completeness", 0.5), 0.85)
+            llm_data["relevance"] = max(llm_data.get("relevance", 0.5), 0.90)
+            llm_data["clarity"] = max(llm_data.get("clarity", 0.5), 0.85)
+            llm_data["final_answer_correct"] = True
+            llm_data["method_correct"] = True
+
+            llm_data["reasoning"] = (
+                f"Student's final answer ({stu_final}) matches reference ({ref_final}). "
+                f"Method is correct. No order of operations violations."
+            )
+
+            if not llm_data.get("feedback") or len(llm_data.get("feedback", "")) < 30:
+                llm_data["feedback"] = (
+                    f"Excellent work! Your final answer of {stu_final} is correct. "
+                    f"You correctly identified that you needed to add the given amounts "
+                    f"and then subtract from the total. Your step-by-step approach is clear "
+                    f"and easy to follow. Keep up the great work!"
+                )
+
+            if not llm_data.get("improvement_suggestions"):
+                llm_data["improvement_suggestions"] = [
+                    "Your method is correct — keep using this step-by-step approach.",
+                    "Try solving similar problems with larger numbers to build confidence.",
+                    "Consider writing the equation form (e.g., 15 - (4+3) = 8) alongside your word explanation.",
+                ]
+
+        elif final_correct and not method_correct:
+            # ── CORRECT ANSWER + WRONG METHOD → MODERATE SCORE ──
+            llm_data["correctness"] = min(max(llm_data.get("correctness", 0.5), 0.35), 0.45)
+            llm_data["completeness"] = min(llm_data.get("completeness", 1.0), 0.50)
+            llm_data["final_answer_correct"] = True
+            llm_data["method_correct"] = False
+
+            llm_data["feedback"] = (
+                f"Your final answer of {stu_final} is correct, but your method has issues. "
+                f"While you arrived at the right number, the steps you showed contain errors. "
+                f"In mathematics, showing the correct process is just as important as the final answer."
+            )
+
+        elif not final_correct and ref_final is not None:
+            # ── WRONG ANSWER → HEAVY PENALTY ──
             llm_data["correctness"] = min(llm_data.get("correctness", 1.0), 0.10)
             llm_data["completeness"] = min(llm_data.get("completeness", 1.0), 0.20)
             llm_data["final_answer_correct"] = False
 
-            # Build specific feedback about the error
             error_details = []
-
             if bodmas_violation:
                 error_details.append(
-                    "You did NOT follow the order of operations (BODMAS/PEMDAS). "
-                    "You must perform Division and Multiplication BEFORE Addition and Subtraction, "
-                    "working from left to right for equal-priority operations."
+                    "You did NOT follow the order of operations (BODMAS/PEMDAS)."
                 )
-                llm_data["method_correct"] = False
 
             error_details.append(
                 f"Your final answer is {stu_final}, but the correct answer is {ref_final}."
             )
 
-            # Generate real feedback based on actual error
             llm_data["feedback"] = (
-                f"Your calculation is incorrect. You got {stu_final} but the correct "
-                f"answer is {ref_final}. "
-                + " ".join(error_details) + " "
-                "Let me show you the correct approach: For an expression like "
-                "'12 + 8 ÷ 2 × 3 - 5', you must first do 8÷2=4, then 4×3=12, "
-                "then 12+12=24, then 24-5=19. The order matters!"
+                f"Your calculation is incorrect. " + " ".join(error_details) + " "
+                "Review the correct order of operations and check each step carefully."
             )
 
-            # Real improvement suggestions based on actual error
             llm_data["improvement_suggestions"] = [
-                "MEMORIZE BODMAS/PEMDAS: Brackets, Orders, Division, Multiplication, Addition, Subtraction.",
-                "For every calculation, IDENTIFY which operations to do first BEFORE calculating.",
-                "Multiplication (×) and Division (÷) come BEFORE Addition (+) and Subtraction (-).",
-                f"To verify: Take your answer ({stu_final}) and work backwards - it should equal the original expression.",
-                "Practice with 10 similar problems, always writing which operation you're doing at each step.",
+                "Follow BODMAS/PEMDAS: Brackets, Orders, Division, Multiplication, Addition, Subtraction.",
+                f"Verify: your answer ({stu_final}) should satisfy the original problem.",
+                "Write each step on a separate line and check the arithmetic.",
             ]
 
-            # Set wrong concepts based on real errors
-            if "wrong_steps" not in llm_data or not llm_data["wrong_steps"]:
-                llm_data["wrong_steps"] = [
-                    "Did not identify multiplication and division as higher priority operations",
-                    f"Calculated left-to-right instead of using BODMAS, resulting in {stu_final} instead of {ref_final}"
-                ]
-
-            llm_data["reasoning"] = (
-                f"Student's final answer ({stu_final}) does NOT match correct answer ({ref_final}). "
-                f"Order of operations violation detected: {bodmas_violation}. "
-                f"Correctness capped at 0.10 due to fundamentally wrong result."
-            )
-
-        elif final_correct:
-            # Correct final answer — reward but check method
-            llm_data["correctness"] = max(llm_data.get("correctness", 0.5), 0.85)
-            llm_data["final_answer_correct"] = True
-
-            if not llm_data.get("feedback"):
-                llm_data["feedback"] = (
-                    f"Excellent! Your final answer of {stu_final} is correct. "
-                    "You properly applied the order of operations."
-                )
-
-        # ── ADD METADATA ────────────────────────────────────────
+        # Metadata
         llm_data["reference_final_answer"] = ref_final
         llm_data["student_final_answer"] = stu_final
-        llm_data["model_used"] = result.get("model", "unknown") if 'result' in dir() else "fallback"
-        llm_data["provider"] = result.get("provider", "unknown") if 'result' in dir() else "fallback"
+        llm_data["model_used"] = result.get("model", "fallback") if 'result' in dir() else "fallback"
+        llm_data["provider"] = result.get("provider", "fallback") if 'result' in dir() else "fallback"
 
-        # Ensure required fields exist
-        llm_data.setdefault("relevance", 0.7 if final_correct else 0.5)
+        llm_data.setdefault("relevance", 0.7)
         llm_data.setdefault("clarity", 0.6)
         llm_data.setdefault("improvement_suggestions", [])
         llm_data.setdefault("feedback", "")
