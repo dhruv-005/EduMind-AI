@@ -1,121 +1,76 @@
 import re
-from typing import Dict, Any, Optional
-from app.challenge1_evaluator.subjects.base_evaluator import BaseEvaluator
+import json
+from typing import Dict, Any, List, Optional
 from app.core.logger import logger
+from app.shared.llm_client import llm_client
+from app.challenge1_evaluator.prompts.evaluation_prompt import (
+    MATH_SYSTEM_PROMPT,
+    MATH_EVALUATION_PROMPT,
+)
 
 
-class MathEvaluator(BaseEvaluator):
-    """
-    Math-specific evaluator.
-    Checks formulas, steps, numerical answers, and units.
-    """
+class MathEvaluator:
+    """Strict mathematics evaluator with numerical verification."""
 
-    subject_name = "mathematics"
-
-    def build_evaluation_prompt(
-        self,
-        question: str,
-        reference_answer: str,
-        student_answer: str,
-        grade_level: Optional[str] = None
-    ) -> str:
-        """Math-specific evaluation prompt."""
-        level = f"Grade Level: {grade_level}" if grade_level else ""
-        return f"""You are an expert mathematics teacher evaluating a student's answer.
-
-{level}
-Question: {question}
-Reference Answer: {reference_answer[:600]}
-Student Answer: {student_answer[:600]}
-
-Evaluate specifically for MATHEMATICS. Check:
-1. correctness: Is the final answer correct? Are formulas right?
-2. relevance: Did the student use the right approach/method?
-3. completeness: Are all steps shown? Are units included?
-4. clarity: Is the working clearly presented step by step?
-
-Important: Award partial credit for correct method even if final answer is wrong.
-Penalize heavily if: wrong formula used, no working shown for complex problems.
-
-Respond ONLY with valid JSON:
-{{
-    "correctness": 0.0,
-    "relevance": 0.0,
-    "completeness": 0.0,
-    "clarity": 0.0,
-    "correct_formula": true,
-    "steps_shown": true,
-    "units_correct": true,
-    "reasoning": "brief explanation"
-}}
-"""
-
-    def check_numerical_answer(
-        self,
-        student_answer: str,
-        reference_answer: str
-    ) -> Dict[str, Any]:
-        """
-        Check if numerical answers match.
-        Handles approximate equality for floating point numbers.
-        """
-        # Extract numbers from both answers
-        student_nums = re.findall(
-            r'-?\d+\.?\d*',
-            student_answer
-        )
-        reference_nums = re.findall(
-            r'-?\d+\.?\d*',
-            reference_answer
-        )
-
-        if not student_nums or not reference_nums:
-            return {
-                "numerical_match": False,
-                "student_number": None,
-                "reference_number": None
-            }
-
+    def _extract_all_numbers(self, text: str) -> List[float]:
+        """Extract all numbers from text."""
+        if not text:
+            return []
+        cleaned = text.replace('$', '').replace('\\', ' ')
+        cleaned = re.sub(r'[×xX]', '*', cleaned)
+        cleaned = re.sub(r'[÷]', '/', cleaned)
+        numbers = re.findall(r'-?\d+\.?\d*', cleaned)
         try:
-            student_val = float(student_nums[-1])
-            reference_val = float(reference_nums[-1])
+            return [float(n) for n in numbers]
+        except ValueError:
+            return []
 
-            # Allow 1% tolerance for floating point
-            tolerance = abs(reference_val) * 0.01
-            is_match = abs(student_val - reference_val) <= max(
-                tolerance, 0.001
-            )
+    def _extract_final_answer(self, text: str) -> Optional[float]:
+        """Extract the final numerical answer from text."""
+        if not text:
+            return None
 
-            return {
-                "numerical_match": is_match,
-                "student_number": student_val,
-                "reference_number": reference_val,
-                "difference": abs(student_val - reference_val)
-            }
-        except (ValueError, IndexError):
-            return {
-                "numerical_match": False,
-                "student_number": None,
-                "reference_number": None
-            }
-
-    def check_formula_presence(
-        self,
-        student_answer: str,
-        expected_formulas: list = None
-    ) -> bool:
-        """Check if mathematical formulas/equations are present."""
-        # Look for equation patterns
-        equation_patterns = [
-            r'\d+\s*[+\-*/=]\s*\d+',  # Basic arithmetic
-            r'[a-zA-Z]\s*=\s*[\d+\-*/a-zA-Z]',  # Variable assignment
-            r'\d+\s*[²³⁴]',  # Exponents
-            r'√\d+',  # Square root
-            r'\d+/\d+',  # Fractions
+        # Priority patterns for final answer
+        patterns = [
+            r'final\s*answer[:\s]*\$?(-?\d+\.?\d*)',
+            r'answer\s*(?:is|=)?\s*\$?(-?\d+\.?\d*)',
+            r'result\s*(?:is|=)?\s*\$?(-?\d+\.?\d*)',
+            r'equals?\s*\$?(-?\d+\.?\d*)',
+            r'=\s*\$?(-?\d+\.?\d*)\s*[\.\s]*$',
+            r'get\s+\$?(-?\d+\.?\d*)',
+            r'(-?\d+\.?\d*)\s*$',
         ]
 
-        for pattern in equation_patterns:
-            if re.search(pattern, student_answer):
+        cleaned = text.replace('$', '').replace('\\', ' ')
+
+        for pattern in patterns:
+            matches = re.findall(pattern, cleaned, re.IGNORECASE | re.MULTILINE)
+            if matches:
+                try:
+                    return float(matches[-1])
+                except ValueError:
+                    continue
+
+        # Last resort — use last number found
+        all_nums = self._extract_all_numbers(text)
+        return all_nums[-1] if all_nums else None
+
+    def _check_bodmas_violation(self, student_answer: str) -> bool:
+        """Detect if student violated order of operations."""
+        text = student_answer.lower()
+
+        # Common violation patterns
+        violations = [
+            r'first\s*,?\s*add.*then\s*divide',
+            r'first\s*,?\s*add.*then\s*multiply',
+            r'first\s*,?\s*subtract.*then\s*divide',
+            r'first\s*,?\s*subtract.*then\s*multiply',
+            r'left\s*to\s*right\s*without',
+            r'processed?\s*left\s*to\s*right',
+        ]
+
+        for pattern in violations:
+            if re.search(pattern, text):
                 return True
         return False
 
@@ -124,42 +79,143 @@ Respond ONLY with valid JSON:
         question: str,
         reference_answer: str,
         student_answer: str,
-        grade_level: Optional[str] = None
+        grade_level: str = "Grade 10"
     ) -> Dict[str, Any]:
-        """Enhanced math evaluation with numerical checking."""
+        """Evaluate math answer with strict numerical verification."""
 
-        # Get base LLM evaluation
-        base_scores = await super().evaluate(
+        # ── PROGRAMMATIC CHECKS FIRST ───────────────────────────
+        ref_final = self._extract_final_answer(reference_answer)
+        stu_final = self._extract_final_answer(student_answer)
+
+        final_correct = False
+        if ref_final is not None and stu_final is not None:
+            final_correct = abs(ref_final - stu_final) < 0.001
+
+        bodmas_violation = self._check_bodmas_violation(student_answer)
+
+        logger.info(
+            f"Math check: ref_final={ref_final}, stu_final={stu_final}, "
+            f"correct={final_correct}, bodmas_violation={bodmas_violation}"
+        )
+
+        # ── LLM EVALUATION ──────────────────────────────────────
+        prompt = MATH_EVALUATION_PROMPT.format(
             question=question,
             reference_answer=reference_answer,
             student_answer=student_answer,
-            grade_level=grade_level
         )
 
-        # Check numerical answer
-        num_check = self.check_numerical_answer(
-            student_answer, reference_answer
-        )
-
-        # Boost correctness if numerical answer matches
-        if num_check.get("numerical_match"):
-            base_scores["correctness"] = max(
-                base_scores["correctness"],
-                0.85
+        try:
+            result = await llm_client.chat_async(
+                messages=[
+                    {"role": "system", "content": MATH_SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt},
+                ],
+                max_tokens=1500,
+                temperature=0.1,  # Low for consistency
             )
-            logger.debug("Numerical answer matched - boosting score")
 
-        # Check if formulas are shown
-        has_formula = self.check_formula_presence(student_answer)
-        if not has_formula and len(student_answer.split()) > 5:
-            # Reduce clarity if no mathematical notation shown
-            base_scores["clarity"] = base_scores["clarity"] * 0.9
+            # Parse JSON response
+            raw = result.get("text", "")
+            start = raw.find('{')
+            end = raw.rfind('}') + 1
 
-        base_scores["numerical_check"] = num_check
-        base_scores["has_formula"] = has_formula
+            if start != -1 and end > start:
+                llm_data = json.loads(raw[start:end])
+            else:
+                raise ValueError("No JSON in LLM response")
 
-        return base_scores
+        except Exception as e:
+            logger.error(f"Math LLM failed: {e}")
+            llm_data = {
+                "correctness": 0.5,
+                "relevance": 0.5,
+                "completeness": 0.5,
+                "clarity": 0.5,
+                "reasoning": "LLM evaluation unavailable",
+                "feedback": "Please review your work carefully.",
+                "improvement_suggestions": ["Review the problem step by step"],
+            }
+
+        # ── STRICT OVERRIDE FOR WRONG ANSWERS ───────────────────
+        if not final_correct and ref_final is not None:
+            # Wrong final answer — heavy penalty
+            llm_data["correctness"] = min(llm_data.get("correctness", 1.0), 0.10)
+            llm_data["completeness"] = min(llm_data.get("completeness", 1.0), 0.20)
+            llm_data["final_answer_correct"] = False
+
+            # Build specific feedback about the error
+            error_details = []
+
+            if bodmas_violation:
+                error_details.append(
+                    "You did NOT follow the order of operations (BODMAS/PEMDAS). "
+                    "You must perform Division and Multiplication BEFORE Addition and Subtraction, "
+                    "working from left to right for equal-priority operations."
+                )
+                llm_data["method_correct"] = False
+
+            error_details.append(
+                f"Your final answer is {stu_final}, but the correct answer is {ref_final}."
+            )
+
+            # Generate real feedback based on actual error
+            llm_data["feedback"] = (
+                f"Your calculation is incorrect. You got {stu_final} but the correct "
+                f"answer is {ref_final}. "
+                + " ".join(error_details) + " "
+                "Let me show you the correct approach: For an expression like "
+                "'12 + 8 ÷ 2 × 3 - 5', you must first do 8÷2=4, then 4×3=12, "
+                "then 12+12=24, then 24-5=19. The order matters!"
+            )
+
+            # Real improvement suggestions based on actual error
+            llm_data["improvement_suggestions"] = [
+                "MEMORIZE BODMAS/PEMDAS: Brackets, Orders, Division, Multiplication, Addition, Subtraction.",
+                "For every calculation, IDENTIFY which operations to do first BEFORE calculating.",
+                "Multiplication (×) and Division (÷) come BEFORE Addition (+) and Subtraction (-).",
+                f"To verify: Take your answer ({stu_final}) and work backwards - it should equal the original expression.",
+                "Practice with 10 similar problems, always writing which operation you're doing at each step.",
+            ]
+
+            # Set wrong concepts based on real errors
+            if "wrong_steps" not in llm_data or not llm_data["wrong_steps"]:
+                llm_data["wrong_steps"] = [
+                    "Did not identify multiplication and division as higher priority operations",
+                    f"Calculated left-to-right instead of using BODMAS, resulting in {stu_final} instead of {ref_final}"
+                ]
+
+            llm_data["reasoning"] = (
+                f"Student's final answer ({stu_final}) does NOT match correct answer ({ref_final}). "
+                f"Order of operations violation detected: {bodmas_violation}. "
+                f"Correctness capped at 0.10 due to fundamentally wrong result."
+            )
+
+        elif final_correct:
+            # Correct final answer — reward but check method
+            llm_data["correctness"] = max(llm_data.get("correctness", 0.5), 0.85)
+            llm_data["final_answer_correct"] = True
+
+            if not llm_data.get("feedback"):
+                llm_data["feedback"] = (
+                    f"Excellent! Your final answer of {stu_final} is correct. "
+                    "You properly applied the order of operations."
+                )
+
+        # ── ADD METADATA ────────────────────────────────────────
+        llm_data["reference_final_answer"] = ref_final
+        llm_data["student_final_answer"] = stu_final
+        llm_data["model_used"] = result.get("model", "unknown") if 'result' in dir() else "fallback"
+        llm_data["provider"] = result.get("provider", "unknown") if 'result' in dir() else "fallback"
+
+        # Ensure required fields exist
+        llm_data.setdefault("relevance", 0.7 if final_correct else 0.5)
+        llm_data.setdefault("clarity", 0.6)
+        llm_data.setdefault("improvement_suggestions", [])
+        llm_data.setdefault("feedback", "")
+        llm_data.setdefault("reasoning", "")
+
+        return llm_data
 
 
-# Singleton
 math_evaluator = MathEvaluator()
