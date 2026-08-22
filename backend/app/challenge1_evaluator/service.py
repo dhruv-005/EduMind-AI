@@ -25,8 +25,27 @@ from app.governance.bias_detector import bias_detector
 from app.models.evaluation import Evaluation
 
 
+# ── GRADE INFO HELPER (replaces missing scoring_engine.get_grade_info) ──
+GRADE_THRESHOLDS = [
+    {"min": 9.0, "max": 10.0, "grade": "A+", "label": "Outstanding"},
+    {"min": 8.0, "max": 9.0,  "grade": "A",  "label": "Excellent"},
+    {"min": 7.0, "max": 8.0,  "grade": "B+", "label": "Very Good"},
+    {"min": 6.0, "max": 7.0,  "grade": "B",  "label": "Good"},
+    {"min": 5.0, "max": 6.0,  "grade": "C",  "label": "Average"},
+    {"min": 4.0, "max": 5.0,  "grade": "D",  "label": "Below Average"},
+    {"min": 0.0, "max": 4.0,  "grade": "F",  "label": "Fail"},
+]
+
+def get_grade_info(score_out_of_10: float) -> Dict[str, str]:
+    """Get grade letter and label from score."""
+    for t in GRADE_THRESHOLDS:
+        if t["min"] <= score_out_of_10 <= t["max"]:
+            return {"grade": t["grade"], "label": t["label"]}
+    return {"grade": "F", "label": "Fail"}
+
+
 class EvaluatorService:
-    """Main evaluation service — orchestrates all components."""
+    """Main evaluation service."""
 
     def _get_subject_evaluator(self, subject: str):
         evaluators = {
@@ -39,7 +58,10 @@ class EvaluatorService:
         return evaluators.get(subject.lower(), general_evaluator)
 
     def _is_math_subject(self, subject: str) -> bool:
-        return subject.lower() in ('mathematics', 'math', 'algebra', 'calculus', 'geometry', 'arithmetic')
+        return subject.lower() in (
+            'mathematics', 'math', 'algebra', 'calculus',
+            'geometry', 'arithmetic', 'trigonometry', 'statistics'
+        )
 
     async def evaluate(
         self,
@@ -97,10 +119,9 @@ class EvaluatorService:
                 llm_clarity=llm_scores.get("clarity", 0.5)
             )
 
-            # ══════════════════════════════════════════════════════
+            # ══════════════════════════════════════════════════
             # MATH OVERRIDE: Subject evaluator takes precedence
-            # over concept_coverage for math subjects
-            # ══════════════════════════════════════════════════════
+            # ══════════════════════════════════════════════════
             if self._is_math_subject(request.subject):
                 llm_correctness = llm_scores.get("correctness", 0.5)
                 llm_completeness = llm_scores.get("completeness", 0.5)
@@ -109,36 +130,34 @@ class EvaluatorService:
                 final_correct = llm_scores.get("final_answer_correct", None)
 
                 if final_correct is True:
-                    # Correct answer — use LLM scores directly, ignore brittle concept matching
                     correctness = max(correctness, llm_correctness)
                     completeness = max(completeness, llm_completeness)
                     relevance = max(relevance, llm_relevance)
                     clarity = max(clarity, llm_clarity)
                     logger.info(
-                        f"Math override: final answer CORRECT. "
-                        f"correctness={correctness:.2f}, completeness={completeness:.2f}"
+                        f"Math override: CORRECT answer. "
+                        f"correctness={correctness:.2f}"
                     )
                 elif final_correct is False:
-                    # Wrong answer — enforce low scores
                     correctness = min(correctness, llm_correctness)
                     completeness = min(completeness, llm_completeness)
                     logger.info(
-                        f"Math override: final answer WRONG. "
+                        f"Math override: WRONG answer. "
                         f"correctness={correctness:.2f}"
                     )
 
-            # Apply strict mode
+            # Strict mode
             if request.strict_mode:
                 correctness = min(correctness, llm_scores.get("correctness", 0.5) * 0.8)
                 completeness = min(completeness, concept_coverage * 0.8)
 
-            # Clamp values
+            # Clamp
             correctness = max(0.0, min(1.0, correctness))
             relevance   = max(0.0, min(1.0, relevance))
             completeness = max(0.0, min(1.0, completeness))
             clarity     = max(0.0, min(1.0, clarity))
 
-            # Convert to weighted scores
+            # Weighted scores
             correctness_weighted  = correctness * 40.0
             relevance_weighted    = relevance * 20.0
             completeness_weighted = completeness * 25.0
@@ -150,9 +169,10 @@ class EvaluatorService:
             )
             score_out_of_10 = total_score / 10.0
 
-            grade_info = scoring_engine.get_grade_info(score_out_of_10)
+            # ── USE INLINE GRADE FUNCTION ──────────────────────
+            grade_info = get_grade_info(score_out_of_10)
 
-            # Use LLM feedback if available (it's more specific and real)
+            # Feedback — prefer LLM feedback (more specific and real)
             feedback = llm_scores.get("feedback", "")
             if not feedback or len(feedback) < 30:
                 feedback = feedback_generator.generate_feedback(
@@ -178,7 +198,7 @@ class EvaluatorService:
                     concept_analysis=concept_analysis
                 )
 
-            # Confidence score — for math, use final_answer_correct as strong signal
+            # Confidence
             if self._is_math_subject(request.subject):
                 final_correct = llm_scores.get("final_answer_correct", None)
                 if final_correct is True:
@@ -193,7 +213,6 @@ class EvaluatorService:
             confidence = max(0.0, min(1.0, confidence))
             review_required = confidence < getattr(settings, 'HUMAN_REVIEW_THRESHOLD', 0.6)
 
-            # Bias detection
             bias_detector.scan_text(request.student_answer + " " + feedback)
 
             result_payload = {
