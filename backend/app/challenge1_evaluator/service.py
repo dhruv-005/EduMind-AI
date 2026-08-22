@@ -25,7 +25,6 @@ from app.governance.bias_detector import bias_detector
 from app.models.evaluation import Evaluation
 
 
-# ── GRADE INFO HELPER (replaces missing scoring_engine.get_grade_info) ──
 GRADE_THRESHOLDS = [
     {"min": 9.0, "max": 10.0, "grade": "A+", "label": "Outstanding"},
     {"min": 8.0, "max": 9.0,  "grade": "A",  "label": "Excellent"},
@@ -37,11 +36,27 @@ GRADE_THRESHOLDS = [
 ]
 
 def get_grade_info(score_out_of_10: float) -> Dict[str, str]:
-    """Get grade letter and label from score."""
     for t in GRADE_THRESHOLDS:
         if t["min"] <= score_out_of_10 <= t["max"]:
             return {"grade": t["grade"], "label": t["label"]}
     return {"grade": "F", "label": "Fail"}
+
+
+def safe_bias_scan(text: str) -> Dict[str, Any]:
+    """Safe wrapper — never crashes even if bias_detector is missing methods."""
+    try:
+        if hasattr(bias_detector, 'scan_text'):
+            return bias_detector.scan_text(text)
+        elif hasattr(bias_detector, 'detect_bias'):
+            return bias_detector.detect_bias(text)
+        elif hasattr(bias_detector, 'check'):
+            return bias_detector.check(text)
+        else:
+            logger.warning("BiasDetector has no scan method — skipping bias check")
+            return {"has_bias": False, "bias_score": 0.0}
+    except Exception as e:
+        logger.warning(f"Bias scan failed (non-critical): {e}")
+        return {"has_bias": False, "bias_score": 0.0}
 
 
 class EvaluatorService:
@@ -119,9 +134,7 @@ class EvaluatorService:
                 llm_clarity=llm_scores.get("clarity", 0.5)
             )
 
-            # ══════════════════════════════════════════════════
-            # MATH OVERRIDE: Subject evaluator takes precedence
-            # ══════════════════════════════════════════════════
+            # MATH OVERRIDE
             if self._is_math_subject(request.subject):
                 llm_correctness = llm_scores.get("correctness", 0.5)
                 llm_completeness = llm_scores.get("completeness", 0.5)
@@ -134,30 +147,21 @@ class EvaluatorService:
                     completeness = max(completeness, llm_completeness)
                     relevance = max(relevance, llm_relevance)
                     clarity = max(clarity, llm_clarity)
-                    logger.info(
-                        f"Math override: CORRECT answer. "
-                        f"correctness={correctness:.2f}"
-                    )
+                    logger.info(f"Math override: CORRECT. correctness={correctness:.2f}")
                 elif final_correct is False:
                     correctness = min(correctness, llm_correctness)
                     completeness = min(completeness, llm_completeness)
-                    logger.info(
-                        f"Math override: WRONG answer. "
-                        f"correctness={correctness:.2f}"
-                    )
+                    logger.info(f"Math override: WRONG. correctness={correctness:.2f}")
 
-            # Strict mode
             if request.strict_mode:
                 correctness = min(correctness, llm_scores.get("correctness", 0.5) * 0.8)
                 completeness = min(completeness, concept_coverage * 0.8)
 
-            # Clamp
             correctness = max(0.0, min(1.0, correctness))
             relevance   = max(0.0, min(1.0, relevance))
             completeness = max(0.0, min(1.0, completeness))
             clarity     = max(0.0, min(1.0, clarity))
 
-            # Weighted scores
             correctness_weighted  = correctness * 40.0
             relevance_weighted    = relevance * 20.0
             completeness_weighted = completeness * 25.0
@@ -169,10 +173,8 @@ class EvaluatorService:
             )
             score_out_of_10 = total_score / 10.0
 
-            # ── USE INLINE GRADE FUNCTION ──────────────────────
             grade_info = get_grade_info(score_out_of_10)
 
-            # Feedback — prefer LLM feedback (more specific and real)
             feedback = llm_scores.get("feedback", "")
             if not feedback or len(feedback) < 30:
                 feedback = feedback_generator.generate_feedback(
@@ -213,7 +215,8 @@ class EvaluatorService:
             confidence = max(0.0, min(1.0, confidence))
             review_required = confidence < getattr(settings, 'HUMAN_REVIEW_THRESHOLD', 0.6)
 
-            bias_detector.scan_text(request.student_answer + " " + feedback)
+            # ── SAFE BIAS SCAN (never crashes) ──────────────────
+            safe_bias_scan(request.student_answer + " " + feedback)
 
             result_payload = {
                 "request_id":       request_id,
