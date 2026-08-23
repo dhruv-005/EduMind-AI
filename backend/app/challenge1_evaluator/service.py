@@ -43,8 +43,34 @@ def get_grade_info(score_out_of_10: float) -> Dict[str, str]:
     return {"grade": "F", "label": "Fail"}
 
 
-def simple_keyword_concepts(ref_text: str, stu_text: str) -> Dict[str, Any]:
-    """Pure-Python keyword concept matching."""
+def simple_stem(word: str) -> str:
+    """Basic English stemmer — strips common suffixes."""
+    w = word.lower().strip()
+    if len(w) <= 3:
+        return w
+    # Strip common suffixes
+    for suffix in ['tion', 'sion', 'ment', 'ness', 'ence', 'ance',
+                   'ally', 'ally', 'ible', 'able', 'ying', 'ting',
+                   'ning', 'ding', 'ling', 'ring', 'sing',
+                   'ing', 'ies', 'ers', 'ous', 'ive', 'ful',
+                   'less', 'ward', 'like', 'wise',
+                   'ed', 'er', 'ly', 'al', 'es', 'or',
+                   'ty', 'ry', 'cy', 'gy', 'fy',
+                   's']:
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            return w[:-len(suffix)]
+    return w
+
+
+def simple_keyword_concepts(
+    ref_text: str, stu_text: str, question_text: str = ""
+) -> Dict[str, Any]:
+    """
+    Smart keyword concept matching.
+    - Uses basic stemming to match word variants (float/floats, divide/divided)
+    - Excludes words from the question itself (not student errors)
+    - Only flags genuinely incorrect concepts
+    """
     stop_words = {
         "the", "and", "for", "that", "this", "with", "from", "are",
         "was", "were", "her", "his", "she", "him", "its", "not",
@@ -61,30 +87,49 @@ def simple_keyword_concepts(ref_text: str, stu_text: str) -> Dict[str, Any]:
         "could", "would", "should", "does", "did", "let", "say",
         "one", "two", "three", "four", "five", "six", "seven",
         "eight", "nine", "ten", "first", "second", "third",
-        "use", "using", "used", "given", "find", "solve",
+        "use", "using", "used", "given", "calculate", "solve",
+        "since", "over", "under", "less", "greater", "equal",
+        "pure", "solid", "cubic", "centimeters", "grams",
     }
 
-    # Extract meaningful words (>= 3 chars, not stop words)
-    ref_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', ref_text.lower())) - stop_words
-    stu_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', stu_text.lower())) - stop_words
+    def extract_words(text):
+        """Extract meaningful words with stemming."""
+        raw = set(re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())) - stop_words
+        return {simple_stem(w): w for w in raw}
 
-    # Also extract numbers as concepts for math
+    ref_stems = extract_words(ref_text)
+    stu_stems = extract_words(stu_text)
+    q_stems = extract_words(question_text) if question_text else {}
+
+    # Also extract numbers
     ref_nums = set(re.findall(r'\b\d+\.?\d*\b', ref_text))
     stu_nums = set(re.findall(r'\b\d+\.?\d*\b', stu_text))
+    q_nums = set(re.findall(r'\b\d+\.?\d*\b', question_text)) if question_text else set()
 
-    correct_words = list(ref_words & stu_words)
-    missing_words = list(ref_words - stu_words)
-    wrong_words = list(stu_words - ref_words)
+    # Correct: student stems that match reference stems
+    correct_stems = set(ref_stems.keys()) & set(stu_stems.keys())
+    correct = [ref_stems[s] for s in correct_stems]
 
-    # Include number matching
+    # Missing: reference stems NOT in student
+    missing_stems = set(ref_stems.keys()) - set(stu_stems.keys())
+    missing = [ref_stems[s] for s in missing_stems]
+
+    # Wrong: student stems NOT in reference AND NOT in question
+    # (words from the question are NOT student errors)
+    wrong_stems = set(stu_stems.keys()) - set(ref_stems.keys()) - set(q_stems.keys())
+    wrong = [stu_stems[s] for s in wrong_stems]
+
+    # Number matching
     correct_nums = list(ref_nums & stu_nums)
-    missing_nums = list(ref_nums - stu_nums)
+    missing_nums = list(ref_nums - stu_nums - q_nums)
 
-    correct = correct_words + correct_nums
-    missing = missing_words + missing_nums
-    wrong = wrong_words[:5]  # limit wrong to avoid noise
+    correct += correct_nums
+    missing += missing_nums
 
-    total_expected = len(ref_words) + len(ref_nums)
+    # Limit wrong concepts to genuinely wrong ones (max 5)
+    wrong = wrong[:5]
+
+    total_expected = len(ref_stems) + len(ref_nums)
     total_found = len(correct)
     coverage = (total_found / max(total_expected, 1)) * 100.0
 
@@ -139,21 +184,21 @@ class EvaluatorService:
                 semantic_sim = 0.5
             logger.debug(f"Semantic similarity: {semantic_sim:.3f}")
 
-            # STEP 2: Concept extraction (with fallback)
+            # STEP 2: Concept extraction (with smart fallback)
             try:
                 concept_analysis = await concept_extractor.full_concept_analysis(
                     reference_answer=request.reference_answer,
                     student_answer=request.student_answer,
                     subject=request.subject
                 )
-                # If coverage is suspiciously low (embedding failed), use regex
                 if concept_analysis.get("coverage_percentage", 0) < 5.0:
                     raise ValueError("Coverage too low, using regex fallback")
             except Exception as e:
                 logger.warning(f"Concept fallback to regex: {e}")
                 concept_analysis = simple_keyword_concepts(
-                    request.reference_answer,
-                    request.student_answer
+                    ref_text=request.reference_answer,
+                    stu_text=request.student_answer,
+                    question_text=request.question
                 )
 
             concept_coverage = concept_analysis.get("coverage_percentage", 50.0) / 100.0
@@ -176,13 +221,11 @@ class EvaluatorService:
             llm_clar = float(llm_scores.get("clarity", 0.5))
 
             if self._is_math_subject(request.subject):
-                # For math: trust LLM scores directly (they include method checks)
                 correctness  = llm_corr
                 completeness = llm_comp
                 relevance    = llm_rel
                 clarity      = llm_clar
             else:
-                # Other subjects: blend LLM + concept coverage
                 correctness  = (llm_corr * 0.7) + (concept_coverage * 0.3)
                 completeness = (llm_comp * 0.7) + (concept_coverage * 0.3)
                 relevance    = llm_rel
@@ -191,13 +234,11 @@ class EvaluatorService:
             if request.strict_mode:
                 correctness = min(correctness, llm_corr * 0.8)
 
-            # Clamp
             correctness  = max(0.0, min(1.0, correctness))
             relevance    = max(0.0, min(1.0, relevance))
             completeness = max(0.0, min(1.0, completeness))
             clarity      = max(0.0, min(1.0, clarity))
 
-            # Weighted
             correctness_weighted  = correctness * 40.0
             relevance_weighted    = relevance * 20.0
             completeness_weighted = completeness * 25.0
@@ -210,7 +251,6 @@ class EvaluatorService:
             score_out_of_10 = total_score / 10.0
             grade_info = get_grade_info(score_out_of_10)
 
-            # Feedback from LLM (real, specific)
             feedback = llm_scores.get("feedback", "")
             if not feedback or len(feedback) < 20:
                 feedback = (
@@ -222,7 +262,6 @@ class EvaluatorService:
             if not suggestions:
                 suggestions = ["Review the core concepts of this question."]
 
-            # Confidence
             final_correct = llm_scores.get("final_answer_correct", None)
             if final_correct is True:
                 confidence = 0.90
@@ -234,7 +273,6 @@ class EvaluatorService:
             confidence = max(0.0, min(1.0, confidence))
             review_required = confidence < getattr(settings, 'HUMAN_REVIEW_THRESHOLD', 0.6)
 
-            # Bias check
             try:
                 bias_detector.scan_text(request.student_answer + " " + feedback)
             except Exception:
