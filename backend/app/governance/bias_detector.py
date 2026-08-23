@@ -4,7 +4,7 @@ from app.core.logger import logger
 
 
 class BiasDetector:
-    """Pillar 4: Bias Detection & Fairness."""
+    """Pillar 4: Bias Detection & Fairness Scanner."""
 
     def __init__(self):
         self.bias_patterns = {
@@ -56,4 +56,5 @@ class BiasDetector:
         return self.scan_text(text)
 
 
+# Singleton
 bias_detector = BiasDetector()

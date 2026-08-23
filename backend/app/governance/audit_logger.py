@@ -9,7 +9,9 @@ from app.core.logger import logger
 
 def hash_sensitive_data(data: str) -> str:
     """Hash sensitive data for privacy-preserving logging."""
-    return hashlib.sha256(data.encode()).hexdigest()[:16]
+    if not data:
+        return "anonymous"
+    return hashlib.sha256(str(data).encode()).hexdigest()[:16]
 
 
 def generate_request_id() -> str:
@@ -18,58 +20,87 @@ def generate_request_id() -> str:
 
 
 class AuditLogger:
-    """Comprehensive audit logging for all AI decisions."""
+    """Comprehensive audit logging for all AI decisions with robust keyword handling."""
 
     def __init__(self):
         self.logs_buffer = []
 
     def log_ai_decision(
         self,
-        db: Optional[Session],
-        request_id: str,
-        challenge: str,
-        user_id: Optional[str],
-        session_id: Optional[str],
-        input_summary: str,
-        model_used: str,
-        model_version: str,
-        prompt_version: str,
-        output_summary: str,
-        confidence_score: float,
-        processing_time_ms: float,
-        governance_status: str,
+        db: Optional[Session] = None,
+        request_id: Optional[str] = None,
+        challenge: str = "general",
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        input_summary: str = "",
+        model_used: str = "unknown",
+        model_version: str = "1.0",
+        prompt_version: str = "1.0",
+        output_summary: str = "",
+        confidence_score: float = 1.0,
+        processing_time_ms: float = 0.0,
+        governance_status: str = "passed",
         governance_reason: str = "",
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        *args,
+        **kwargs
     ) -> Dict[str, Any]:
-        """Log an AI decision to database and logger."""
+        """
+        Log an AI decision to database and logger.
+        Gracefully accepts any parameter format (status, time_ms, etc.).
+        """
+        # Map alternative keyword arguments
+        if "status" in kwargs:
+            governance_status = kwargs.get("status") or governance_status
+        if "time_ms" in kwargs:
+            try:
+                processing_time_ms = float(kwargs.get("time_ms", 0.0))
+            except (ValueError, TypeError):
+                pass
+        if "summary" in kwargs and not output_summary:
+            output_summary = str(kwargs.get("summary", ""))
+        if "extra_metadata" in kwargs and not metadata:
+            metadata = kwargs.get("extra_metadata")
+
+        req_id = request_id or generate_request_id()
+
+        try:
+            conf = round(float(confidence_score), 3) if confidence_score is not None else 1.0
+        except (ValueError, TypeError):
+            conf = 1.0
+
+        try:
+            proc_time = round(float(processing_time_ms), 2) if processing_time_ms is not None else 0.0
+        except (ValueError, TypeError):
+            proc_time = 0.0
 
         log_entry = {
-            "request_id": request_id,
+            "request_id": req_id,
             "timestamp": datetime.utcnow().isoformat(),
             "challenge": challenge,
-            "user_id": hash_sensitive_data(user_id) if user_id else "anonymous",
+            "user_id": hash_sensitive_data(user_id),
             "session_id": session_id or "none",
             "input_hash": hash_sensitive_data(input_summary),
             "model_used": model_used,
             "model_version": model_version,
             "prompt_version": prompt_version,
-            "output_summary": output_summary[:200],
-            "confidence_score": round(confidence_score, 3),
-            "processing_time_ms": round(processing_time_ms, 2),
-            "governance_status": governance_status,
-            "governance_reason": governance_reason,
+            "output_summary": (output_summary[:200] if output_summary else ""),
+            "confidence_score": conf,
+            "processing_time_ms": proc_time,
+            "governance_status": governance_status or "passed",
+            "governance_reason": governance_reason or "",
             "metadata": metadata or {}
         }
 
-        # Log to file
+        # Log to application log
         logger.info(
-            f"AUDIT | {challenge} | {request_id} | "
-            f"model={model_used} | confidence={confidence_score:.2f} | "
-            f"status={governance_status} | time={processing_time_ms:.0f}ms"
+            f"AUDIT | {challenge} | {req_id} | "
+            f"model={model_used} | confidence={conf:.2f} | "
+            f"status={governance_status} | time={proc_time:.0f}ms"
         )
 
         # Store in database if session available
-        if db:
+        if db is not None:
             try:
                 self._save_to_db(db, log_entry)
             except Exception as e:
