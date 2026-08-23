@@ -61,12 +61,65 @@ def simple_stem(word: str) -> str:
     return w
 
 
+# Synonym groups — words that mean the same thing
+# All words in a group map to the FIRST word (canonical form)
+SYNONYM_GROUPS = [
+    ["equation", "reaction", "expression"],
+    ["formula", "formulas"],
+    ["float", "floats", "floating", "buoyant"],
+    ["sink", "sinks", "sinking"],
+    ["divide", "divided", "dividing", "division"],
+    ["multiply", "multiplied", "multiplying", "multiplication"],
+    ["add", "added", "adding", "addition"],
+    ["subtract", "subtracted", "subtracting", "subtraction"],
+    ["substitute", "substituted", "substituting", "substitution"],
+    ["calculate", "calculated", "calculating", "calculation"],
+    ["convert", "converted", "converting", "conversion"],
+    ["produce", "produced", "producing", "production"],
+    ["identify", "identified", "identifying", "identification"],
+    ["expand", "expanded", "expanding", "expansion"],
+    ["simplify", "simplified", "simplifying"],
+    ["solve", "solved", "solving", "solution"],
+    ["isolate", "isolated", "isolating"],
+    ["balance", "balanced", "balancing"],
+    ["compare", "compared", "comparing", "comparison"],
+    ["determine", "determined", "determining"],
+    ["express", "expressed", "expressing"],
+    ["water", "h2o"],
+    ["hydrogen", "h2"],
+    ["oxygen", "o2"],
+    ["mass", "masses", "weight"],
+    ["mole", "moles", "mol"],
+    ["density", "densities"],
+    ["volume", "volumes"],
+    ["ratio", "ratios", "proportion"],
+    ["coefficient", "coefficients"],
+    ["stoichiometric", "stoichiometry"],
+    ["molar", "molar mass"],
+    ["gram", "grams", "g"],
+    ["centimeter", "centimeters", "cm"],
+    ["object", "objects", "block", "body"],
+    ["wooden", "wood"],
+    ["pure", "pure water"],
+    ["excess", "excess oxygen"],
+    ["complete", "completely", "complete reaction"],
+]
+
+# Build lookup: word -> canonical form
+SYNONYM_MAP = {}
+for group in SYNONYM_GROUPS:
+    canonical = group[0]
+    for word in group:
+        SYNONYM_MAP[word] = canonical
+
+
 def smart_keyword_concepts(
     ref_text: str, stu_text: str, question_text: str = ""
 ) -> Dict[str, Any]:
     """
-    Smart concept matching with stemming and question-awareness.
+    Smart concept matching with stemming, synonyms, and question-awareness.
     Words from the question are NEVER flagged as student errors.
+    Synonyms are treated as equivalent (reaction = equation).
     """
     stop_words = {
         "the", "and", "for", "that", "this", "with", "from", "are",
@@ -84,16 +137,34 @@ def smart_keyword_concepts(
         "could", "would", "should", "does", "did", "let", "say",
         "one", "two", "three", "four", "five", "six", "seven",
         "eight", "nine", "ten", "first", "second", "third",
-        "use", "using", "used", "given", "calculate", "solve",
-        "since", "over", "under", "less", "greater", "equal",
-        "pure", "solid", "cubic", "centimeters", "grams",
-        "completely", "excess", "according", "so", "will",
-        "how", "many", "much", "when", "what", "which",
+        "use", "using", "used", "given", "since", "over", "under",
+        "less", "greater", "equal", "pure", "solid", "cubic",
+        "centimeters", "grams", "completely", "excess", "according",
+        "so", "will", "how", "many", "much", "when", "what", "which",
+        "its", "has", "are", "was", "were", "been", "being",
     }
+
+    def canonicalize(word: str) -> str:
+        """Map word to its canonical synonym form, then stem."""
+        w = word.lower().strip()
+        # Check synonym map first
+        if w in SYNONYM_MAP:
+            return SYNONYM_MAP[w]
+        # Then stem
+        stemmed = simple_stem(w)
+        # Check if stemmed form has a synonym
+        if stemmed in SYNONYM_MAP:
+            return SYNONYM_MAP[stemmed]
+        return stemmed
 
     def extract_words(text):
         raw = set(re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())) - stop_words
-        return {simple_stem(w): w for w in raw}
+        result = {}
+        for w in raw:
+            canon = canonicalize(w)
+            if canon not in result:
+                result[canon] = w  # Keep original word for display
+        return result
 
     ref_stems = extract_words(ref_text)
     stu_stems = extract_words(stu_text)
@@ -180,7 +251,7 @@ class EvaluatorService:
                 semantic_sim = 0.5
             logger.debug(f"Semantic similarity: {semantic_sim:.3f}")
 
-            # STEP 2: ALWAYS use smart keyword concepts (question-aware)
+            # STEP 2: ALWAYS use smart keyword concepts (question-aware + synonyms)
             concept_analysis = smart_keyword_concepts(
                 ref_text=request.reference_answer,
                 stu_text=request.student_answer,
