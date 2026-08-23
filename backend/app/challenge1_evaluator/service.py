@@ -44,32 +44,29 @@ def get_grade_info(score_out_of_10: float) -> Dict[str, str]:
 
 
 def simple_stem(word: str) -> str:
-    """Basic English stemmer — strips common suffixes."""
+    """Basic English stemmer."""
     w = word.lower().strip()
     if len(w) <= 3:
         return w
-    # Strip common suffixes
     for suffix in ['tion', 'sion', 'ment', 'ness', 'ence', 'ance',
-                   'ally', 'ally', 'ible', 'able', 'ying', 'ting',
+                   'ally', 'ible', 'able', 'ying', 'ting',
                    'ning', 'ding', 'ling', 'ring', 'sing',
                    'ing', 'ies', 'ers', 'ous', 'ive', 'ful',
                    'less', 'ward', 'like', 'wise',
                    'ed', 'er', 'ly', 'al', 'es', 'or',
-                   'ty', 'ry', 'cy', 'gy', 'fy',
+                   'ty', 'ry', 'cy', 'gy', 'fy', 'ar',
                    's']:
         if w.endswith(suffix) and len(w) - len(suffix) >= 3:
             return w[:-len(suffix)]
     return w
 
 
-def simple_keyword_concepts(
+def smart_keyword_concepts(
     ref_text: str, stu_text: str, question_text: str = ""
 ) -> Dict[str, Any]:
     """
-    Smart keyword concept matching.
-    - Uses basic stemming to match word variants (float/floats, divide/divided)
-    - Excludes words from the question itself (not student errors)
-    - Only flags genuinely incorrect concepts
+    Smart concept matching with stemming and question-awareness.
+    Words from the question are NEVER flagged as student errors.
     """
     stop_words = {
         "the", "and", "for", "that", "this", "with", "from", "are",
@@ -90,10 +87,11 @@ def simple_keyword_concepts(
         "use", "using", "used", "given", "calculate", "solve",
         "since", "over", "under", "less", "greater", "equal",
         "pure", "solid", "cubic", "centimeters", "grams",
+        "completely", "excess", "according", "so", "will",
+        "how", "many", "much", "when", "what", "which",
     }
 
     def extract_words(text):
-        """Extract meaningful words with stemming."""
         raw = set(re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())) - stop_words
         return {simple_stem(w): w for w in raw}
 
@@ -101,32 +99,30 @@ def simple_keyword_concepts(
     stu_stems = extract_words(stu_text)
     q_stems = extract_words(question_text) if question_text else {}
 
-    # Also extract numbers
+    # Merge question words into reference (question words are not errors)
+    combined_ref = dict(ref_stems)
+    combined_ref.update(q_stems)
+
     ref_nums = set(re.findall(r'\b\d+\.?\d*\b', ref_text))
     stu_nums = set(re.findall(r'\b\d+\.?\d*\b', stu_text))
     q_nums = set(re.findall(r'\b\d+\.?\d*\b', question_text)) if question_text else set()
 
-    # Correct: student stems that match reference stems
-    correct_stems = set(ref_stems.keys()) & set(stu_stems.keys())
-    correct = [ref_stems[s] for s in correct_stems]
+    # Correct: student stems matching combined reference+question
+    correct_stems = set(combined_ref.keys()) & set(stu_stems.keys())
+    correct = list(set(combined_ref[s] for s in correct_stems))
 
     # Missing: reference stems NOT in student
     missing_stems = set(ref_stems.keys()) - set(stu_stems.keys())
-    missing = [ref_stems[s] for s in missing_stems]
+    missing = list(set(ref_stems[s] for s in missing_stems))
 
     # Wrong: student stems NOT in reference AND NOT in question
-    # (words from the question are NOT student errors)
-    wrong_stems = set(stu_stems.keys()) - set(ref_stems.keys()) - set(q_stems.keys())
-    wrong = [stu_stems[s] for s in wrong_stems]
+    wrong_stems = set(stu_stems.keys()) - set(combined_ref.keys())
+    wrong = list(set(stu_stems[s] for s in wrong_stems))
 
-    # Number matching
-    correct_nums = list(ref_nums & stu_nums)
-    missing_nums = list(ref_nums - stu_nums - q_nums)
+    # Numbers
+    correct += list(ref_nums & stu_nums)
+    missing += list(ref_nums - stu_nums - q_nums)
 
-    correct += correct_nums
-    missing += missing_nums
-
-    # Limit wrong concepts to genuinely wrong ones (max 5)
     wrong = wrong[:5]
 
     total_expected = len(ref_stems) + len(ref_nums)
@@ -184,22 +180,12 @@ class EvaluatorService:
                 semantic_sim = 0.5
             logger.debug(f"Semantic similarity: {semantic_sim:.3f}")
 
-            # STEP 2: Concept extraction (with smart fallback)
-            try:
-                concept_analysis = await concept_extractor.full_concept_analysis(
-                    reference_answer=request.reference_answer,
-                    student_answer=request.student_answer,
-                    subject=request.subject
-                )
-                if concept_analysis.get("coverage_percentage", 0) < 5.0:
-                    raise ValueError("Coverage too low, using regex fallback")
-            except Exception as e:
-                logger.warning(f"Concept fallback to regex: {e}")
-                concept_analysis = simple_keyword_concepts(
-                    ref_text=request.reference_answer,
-                    stu_text=request.student_answer,
-                    question_text=request.question
-                )
+            # STEP 2: ALWAYS use smart keyword concepts (question-aware)
+            concept_analysis = smart_keyword_concepts(
+                ref_text=request.reference_answer,
+                stu_text=request.student_answer,
+                question_text=request.question
+            )
 
             concept_coverage = concept_analysis.get("coverage_percentage", 50.0) / 100.0
             logger.debug(f"Concept coverage: {concept_analysis.get('coverage_percentage', 0)}%")
