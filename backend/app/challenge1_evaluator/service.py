@@ -61,6 +61,7 @@ def simple_stem(word: str) -> str:
     return w
 
 
+# Synonym groups — words that mean the same thing
 SYNONYM_GROUPS = [
     ["equation", "reaction", "expression"],
     ["formula", "formulas"],
@@ -101,58 +102,9 @@ SYNONYM_GROUPS = [
     ["pure", "pure water"],
     ["excess", "excess oxygen"],
     ["complete", "completely", "complete reaction"],
-    ["debate", "debates", "contemplate", "contemplating", "weigh", "weighs"],
-    ["suffer", "suffering", "hardship", "hardships", "trouble", "troubles"],
-    ["die", "dying", "death", "end", "ending"],
-    ["fear", "fearing", "worry", "worries", "worried"],
-    ["exist", "existence", "existential", "life", "lifes"],
-    ["endure", "enduring", "tolerate", "bear"],
-    ["crisis", "indecision", "dilemma"],
-    ["cause", "causes", "factor", "factors", "reason", "reasons"],
-    ["trigger", "spark", "event", "incident"],
-    ["war", "wars", "conflict", "conflicts"],
-    ["invade", "invasion", "invading"],
-    ["ally", "allies", "alliance", "alliances"],
-    ["empire", "imperial", "imperialism", "colonial", "colonies"],
-    ["nation", "national", "nationalism", "ethnic"],
-    ["army", "military", "militarism", "arms", "weapons"],
-    ["race", "races", "competition", "compete"],
-    ["power", "powers", "powerful"],
-    ["german", "germany", "german territory"],
-    ["austria", "hungary", "austria-hungary"],
-    ["ferdinand", "franz", "archduke"],
-    ["poland", "polish"],
-    ["hitler", "adolf"],
-    ["student", "pupil", "learner"],
-    ["exam", "examination", "test", "test"],
-    ["job", "work", "working", "shift"],
-    ["evening", "night", "time"],
-    ["study", "studying", "preparing", "prepare"],
-    ["earn", "earning", "wage", "wages", "pay", "pays", "paid"],
-    ["choose", "chooses", "choice", "decision", "decide"],
-    ["give", "give up", "forgo", "forgone", "sacrifice"],
-    ["alternative", "option", "alternative"],
-    ["example", "instance", "instance"],
-    ["refer", "refers", "reference"],
-    ["they", "he", "she", "it"],
-    ["atom", "atoms", "molecule", "molecules"],
-    ["ion", "ions", "cation", "anion", "carbocation", "bromide"],
-    ["charge", "charged", "positive", "positively", "negative"],
-    ["break", "breaking", "cleave", "cleavage"],
-    ["nucleophile", "electrophile", "nucleophilic", "electrophilic"],
-    ["bond", "bonds", "double bond", "single bond", "pi bond"],
-    ["attack", "attacks", "attacking"],
-    ["form", "forms", "forming", "formation"],
-    ["intermediate", "intermediates"],
-    ["mechanism", "mechanisms", "reaction", "reactions"],
-    ["alkene", "alkenes", "ethene", "ethylene"],
-    ["markovnikov", "markovnikov rule"],
-    ["substitution", "addition", "elimination"],
-    ["hydrogen", "h2", "gas"],
-    ["release", "releasing", "released"],
-    ["replace", "replaces", "replacing", "displace"],
 ]
 
+# Build lookup: word -> canonical form
 SYNONYM_MAP = {}
 for group in SYNONYM_GROUPS:
     canonical = group[0]
@@ -163,10 +115,7 @@ for group in SYNONYM_GROUPS:
 def smart_keyword_concepts(
     ref_text: str, stu_text: str, question_text: str = ""
 ) -> Dict[str, Any]:
-    """
-    Smart concept matching with stemming, synonyms, and question-awareness.
-    NOTE: This is used for DISPLAY ONLY, not for scoring.
-    """
+    """Smart concept matching with stemming, synonyms, and question-awareness."""
     stop_words = {
         "the", "and", "for", "that", "this", "with", "from", "are",
         "was", "were", "her", "his", "she", "him", "its", "not",
@@ -197,7 +146,7 @@ def smart_keyword_concepts(
         "value", "values", "step", "steps", "answer", "answers", "question", "questions",
         "square", "squares", "centimeter", "centimeters", "cubic", "grams", "gram",
         "world", "main", "main causes", "main factors",
-        "you", "your", "they", "they", "he", "she", "it", "we", "our",
+        "you", "your", "they", "he", "she", "it", "we", "our",
         "your", "my", "me", "i", "a", "an",
     }
 
@@ -236,13 +185,9 @@ def smart_keyword_concepts(
     missing_stems = set(ref_stems.keys()) - set(stu_stems.keys())
     missing = list(set(ref_stems[s] for s in missing_stems))
 
-    wrong_stems = set(stu_stems.keys()) - set(combined_ref.keys())
-    wrong = list(set(stu_stems[s] for s in wrong_stems))
-
+    # Numbers
     correct += list(ref_nums & stu_nums)
     missing += list(ref_nums - stu_nums - q_nums)
-
-    wrong = wrong[:5]
 
     total_expected = len(ref_stems) + len(ref_nums)
     total_found = len(correct)
@@ -251,7 +196,7 @@ def smart_keyword_concepts(
     return {
         "correct_concepts": correct[:10],
         "missing_concepts": missing[:10],
-        "wrong_concepts": wrong,
+        "wrong_concepts": [], # Set to empty list to prevent local false-positives
         "total_expected": total_expected,
         "total_found": total_found,
         "coverage_percentage": round(coverage, 1)
@@ -290,7 +235,7 @@ class EvaluatorService:
         logger.info(f"Starting evaluation: id={request_id} subject={request.subject}")
 
         try:
-            # STEP 1: Semantic similarity (informational only)
+            # STEP 1: Semantic similarity
             try:
                 semantic_sim = scoring_engine.calculate_semantic_score(
                     request.student_answer, request.reference_answer
@@ -299,17 +244,14 @@ class EvaluatorService:
                 semantic_sim = 0.5
             logger.debug(f"Semantic similarity: {semantic_sim:.3f}")
 
-            # STEP 2: Concept extraction (DISPLAY ONLY — not used for scoring)
+            # STEP 2: ALWAYS use smart keyword concepts (question-aware)
             concept_analysis = smart_keyword_concepts(
                 ref_text=request.reference_answer,
                 stu_text=request.student_answer,
                 question_text=request.question
             )
 
-            concept_coverage = concept_analysis.get("coverage_percentage", 50.0) / 100.0
-            logger.debug(f"Concept coverage (display only): {concept_analysis.get('coverage_percentage', 0)}%")
-
-            # STEP 3: Subject-specific LLM evaluation (PRIMARY SCORING SOURCE)
+            # STEP 3: Subject-specific LLM evaluation (Primary Scoring Source)
             subject_evaluator = self._get_subject_evaluator(request.subject)
             llm_scores = await subject_evaluator.evaluate(
                 question=request.question,
@@ -319,10 +261,23 @@ class EvaluatorService:
             )
             logger.debug(f"LLM scores: {llm_scores}")
 
+            # Overwrite programmatic wrong concepts with true LLM-derived errors
+            # This completely stops false positives like "breaking" or "carbon" from showing as incorrect!
+            concept_analysis["wrong_concepts"] = llm_scores.get("wrong_concepts") or []
+
+            # Recalculate true coverage percentage based on actual accurate concepts
+            correct_len = len(concept_analysis["correct_concepts"])
+            missing_len = len(concept_analysis["missing_concepts"])
+            total_expected = correct_len + missing_len
+            concept_analysis["total_expected"] = total_expected
+            concept_analysis["total_found"] = correct_len
+            concept_analysis["coverage_percentage"] = round((correct_len / max(1, total_expected)) * 100.0, 1)
+
+            concept_coverage = concept_analysis.get("coverage_percentage", 50.0) / 100.0
+            logger.debug(f"Concept coverage (true display): {concept_analysis.get('coverage_percentage', 0)}%")
+
             # STEP 4: Score aggregation
-            # KEY FIX: Trust LLM scores directly for ALL subjects.
-            # The LLM is far more accurate at evaluating answers than
-            # keyword matching. Concept coverage is for display only.
+            # Direct transparent assignment from LLM scoring output to prevent mathematical dampening
             correctness  = float(llm_scores.get("correctness", 0.5))
             completeness = float(llm_scores.get("completeness", 0.5))
             relevance    = float(llm_scores.get("relevance", 0.5))
@@ -331,11 +286,13 @@ class EvaluatorService:
             if request.strict_mode:
                 correctness = min(correctness, correctness * 0.85)
 
+            # Clamp limits safely
             correctness  = max(0.0, min(1.0, correctness))
             relevance    = max(0.0, min(1.0, relevance))
             completeness = max(0.0, min(1.0, completeness))
             clarity      = max(0.0, min(1.0, clarity))
 
+            # Convert to weighted values
             correctness_weighted  = correctness * 40.0
             relevance_weighted    = relevance * 20.0
             completeness_weighted = completeness * 25.0
@@ -348,6 +305,7 @@ class EvaluatorService:
             score_out_of_10 = total_score / 10.0
             grade_info = get_grade_info(score_out_of_10)
 
+            # Construct feedback
             feedback = llm_scores.get("feedback", "")
             if not feedback or len(feedback) < 20:
                 feedback = (
