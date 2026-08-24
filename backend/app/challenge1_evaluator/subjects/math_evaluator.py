@@ -23,16 +23,16 @@ class MathEvaluator:
             return []
 
     def _extract_variable_values(self, text: str) -> Dict[str, float]:
-        """Extract variable assignments like x=2, y=3 from text."""
+        """Extract standalone variable assignments like x = 2, y = 3 from text."""
         if not text:
             return {}
         cleaned = text.replace('$', '').replace('\\', ' ')
-        # Match patterns like x = 2, y=3, x=2.5
-        matches = re.findall(r'([a-zA-Z])\s*=\s*(-?\d+\.?\d*)', cleaned)
+        # \b ensures we only match standalone variables (e.g. 'x = 2'), not word endings (e.g. 'width = 8')
+        matches = re.findall(r'\b([a-zA-Z])\s*=\s*(-?\d+\.?\d*)', cleaned)
         result = {}
         for var, val in matches:
             var_lower = var.lower()
-            if var_lower not in ('e', 'i'):  # skip constants
+            if var_lower not in ('e', 'i'):  # skip standard mathematical constants
                 try:
                     result[var_lower] = float(val)
                 except ValueError:
@@ -90,14 +90,14 @@ class MathEvaluator:
         return any(ind in q_lower for ind in indicators)
 
     def _check_final_answers_match(
-        self, ref_text: str, stu_text: str
+        self, ref_text: str, stu_text: str, is_algebra: bool
     ) -> Tuple[bool, Dict[str, Any]]:
         """Compare final answers — handles single values AND variable assignments."""
         ref_vars = self._extract_variable_values(ref_text)
         stu_vars = self._extract_variable_values(stu_text)
 
-        # If both have variable assignments, compare each variable
-        if ref_vars and stu_vars:
+        # Only compare variable mappings if it is explicitly an algebraic system
+        if is_algebra and ref_vars and stu_vars:
             correct_vars = {}
             wrong_vars = {}
             for var, ref_val in ref_vars.items():
@@ -136,6 +136,30 @@ class MathEvaluator:
 
         return False, {"type": "unknown"}
 
+    def _check_method_correctness(self, reference: str, student: str) -> bool:
+        """Check if student used correct operations."""
+        stu_lower = student.lower()
+        ref_lower = reference.lower()
+
+        ref_ops = set()
+        for op in re.findall(r'add|subtract|multiply|divide|\+|\-|\*|\/', ref_lower):
+            if op in ('add', '+'): ref_ops.add('add')
+            elif op in ('subtract', '-'): ref_ops.add('subtract')
+            elif op in ('multiply', '*'): ref_ops.add('multiply')
+            elif op in ('divide', '/'): ref_ops.add('divide')
+
+        stu_ops = set()
+        for op in re.findall(r'add|subtract|multiply|divide|added|subtracted|took|minus|plus|\+|\-|\*|\/', stu_lower):
+            if op in ('add', 'plus', '+', 'added'): stu_ops.add('add')
+            elif op in ('subtract', 'minus', '-', 'subtracted', 'took'): stu_ops.add('subtract')
+            elif op in ('multiply', '*',): stu_ops.add('multiply')
+            elif op in ('divide', '/'): stu_ops.add('divide')
+
+        if ref_ops and stu_ops:
+            overlap = ref_ops & stu_ops
+            return len(overlap) >= len(ref_ops) * 0.5
+        return True
+
     async def evaluate(
         self,
         question: str,
@@ -143,13 +167,14 @@ class MathEvaluator:
         student_answer: str,
         grade_level: str = "Grade 10"
     ) -> Dict[str, Any]:
-        """Evaluate math answer with strict numerical and method verification."""
+        """Evaluate math answer with strict numerical verification."""
 
         is_algebra = self._is_algebra_problem(question)
         final_match, answer_details = self._check_final_answers_match(
-            reference_answer, student_answer
+            reference_answer, student_answer, is_algebra
         )
         bodmas_violation = self._check_bodmas_violation(student_answer)
+        method_correct = self._check_method_correctness(reference_answer, student_answer)
 
         logger.info(
             f"Math check: final_match={final_match}, "
@@ -191,19 +216,15 @@ class MathEvaluator:
 
         llm_method_correct = llm_data.get("method_correct", None)
 
-        # ══════════════════════════════════════════════════════
-        # STRICT OVERRIDE LOGIC
-        # ══════════════════════════════════════════════════════
-
+        # ── STRICT OVERRIDE ────────────────────────────────────
         if final_match and not bodmas_violation:
-            # ── FINAL ANSWER CORRECT ──
-            # But check if method is also correct (from LLM)
             if llm_method_correct is True or llm_method_correct is None:
-                # Both answer and method correct → high score
                 llm_data["correctness"] = max(llm_data.get("correctness", 0.5), 0.92)
                 llm_data["completeness"] = max(llm_data.get("completeness", 0.5), 0.85)
                 llm_data["relevance"] = max(llm_data.get("relevance", 0.5), 0.90)
                 llm_data["clarity"] = max(llm_data.get("clarity", 0.5), 0.85)
+                llm_data["final_answer_correct"] = True
+                llm_data["method_correct"] = True
 
                 if not llm_data.get("feedback") or len(llm_data.get("feedback", "")) < 30:
                     llm_data["feedback"] = (
@@ -211,39 +232,28 @@ class MathEvaluator:
                         "is sound. You showed clear step-by-step reasoning. Great job!"
                     )
             else:
-                # Answer correct but method flawed → moderate score
-                llm_data["correctness"] = min(
-                    max(llm_data.get("correctness", 0.5), 0.45), 0.55
-                )
-                llm_data["completeness"] = min(
-                    llm_data.get("completeness", 1.0), 0.50
-                )
+                llm_data["correctness"] = min(max(llm_data.get("correctness", 0.5), 0.45), 0.55)
+                llm_data["completeness"] = min(llm_data.get("completeness", 1.0), 0.50)
 
                 llm_data["feedback"] = (
-                    f"Your final answer is numerically correct, but the method you used "
-                    f"has issues. {llm_data.get('reasoning', '')} "
-                    f"In mathematics, arriving at the right answer through an incorrect "
-                    f"method can lead to wrong answers on harder problems. "
-                    f"Please review the proper technique."
+                    f"Your final answer is correct, but your method has issues. "
+                    f"{llm_data.get('reasoning', '')} "
+                    f"Please review the expected procedural steps."
                 )
 
             llm_data["final_answer_correct"] = True
 
         elif not final_match:
-            # ── FINAL ANSWER WRONG ──
             llm_data["correctness"] = min(llm_data.get("correctness", 1.0), 0.10)
             llm_data["completeness"] = min(llm_data.get("completeness", 1.0), 0.25)
             llm_data["final_answer_correct"] = False
 
-            # Build specific feedback based on what went wrong
             if answer_details.get("type") == "variables":
                 wrong = answer_details.get("wrong_vars", {})
                 correct = answer_details.get("correct_vars", {})
                 parts = []
                 if correct:
-                    correct_str = ", ".join(
-                        f"{k}={v}" for k, v in correct.items()
-                    )
+                    correct_str = ", ".join(f"{k}={v}" for k, v in correct.items())
                     parts.append(f"You correctly found {correct_str}.")
                 if wrong:
                     for var, vals in wrong.items():
@@ -251,9 +261,7 @@ class MathEvaluator:
                             f"However, {var}={vals['student']} is wrong — "
                             f"the correct value is {var}={vals['correct']}."
                         )
-                llm_data["feedback"] = " ".join(parts) + (
-                    " Check your arithmetic carefully in the back-substitution step."
-                )
+                llm_data["feedback"] = " ".join(parts) + " Check your arithmetic in the substitution steps."
             else:
                 ref_val = answer_details.get("ref_final", "?")
                 stu_val = answer_details.get("stu_final", "?")
@@ -263,7 +271,6 @@ class MathEvaluator:
                     "Review each step of your calculation carefully."
                 )
 
-            # Context-aware suggestions (no BODMAS for algebra)
             if is_algebra:
                 llm_data["improvement_suggestions"] = [
                     "Double-check your back-substitution arithmetic.",

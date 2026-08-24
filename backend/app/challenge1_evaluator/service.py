@@ -44,7 +44,7 @@ def get_grade_info(score_out_of_10: float) -> Dict[str, str]:
 
 
 def simple_stem(word: str) -> str:
-    """Basic English stemmer to normalize word variations."""
+    """Basic English stemmer."""
     w = word.lower().strip()
     if len(w) <= 3:
         return w
@@ -141,13 +141,14 @@ def smart_keyword_concepts(
         "completely", "excess", "according", "so", "will",
         "how", "many", "much", "when", "what", "which",
         "its", "has", "are", "was", "were", "been", "being",
-        # Structural operation terms added to stop list to eliminate remaining false positives
+        # Structural operations & unit descriptors added to filter list to prevent false positives
         "divide", "divided", "dividing", "division", "by",
         "multiply", "multiplied", "multiplying", "multiplication",
         "add", "added", "adding", "addition",
         "subtract", "subtracted", "subtracting", "subtraction",
         "sum", "product", "difference", "ratio", "over", "plus", "minus", "times",
-        "value", "values", "step", "steps", "answer", "answers", "question", "questions"
+        "value", "values", "step", "steps", "answer", "answers", "question", "questions",
+        "square", "squares", "centimeter", "centimeters", "cubic", "cm³", "g/cm³", "grams", "gram"
     }
 
     def canonicalize(word: str) -> str:
