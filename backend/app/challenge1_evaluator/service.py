@@ -44,7 +44,7 @@ def get_grade_info(score_out_of_10: float) -> Dict[str, str]:
 
 
 def simple_stem(word: str) -> str:
-    """Basic English stemmer."""
+    """Basic English stemmer to normalize word variations."""
     w = word.lower().strip()
     if len(w) <= 3:
         return w
@@ -62,7 +62,6 @@ def simple_stem(word: str) -> str:
 
 
 # Synonym groups — words that mean the same thing
-# All words in a group map to the FIRST word (canonical form)
 SYNONYM_GROUPS = [
     ["equation", "reaction", "expression"],
     ["formula", "formulas"],
@@ -118,8 +117,7 @@ def smart_keyword_concepts(
 ) -> Dict[str, Any]:
     """
     Smart concept matching with stemming, synonyms, and question-awareness.
-    Words from the question are NEVER flagged as student errors.
-    Synonyms are treated as equivalent (reaction = equation).
+    Prevents standard structural terms and question context from throwing false errors.
     """
     stop_words = {
         "the", "and", "for", "that", "this", "with", "from", "are",
@@ -137,22 +135,27 @@ def smart_keyword_concepts(
         "could", "would", "should", "does", "did", "let", "say",
         "one", "two", "three", "four", "five", "six", "seven",
         "eight", "nine", "ten", "first", "second", "third",
-        "use", "using", "used", "given", "since", "over", "under",
-        "less", "greater", "equal", "pure", "solid", "cubic",
-        "centimeters", "grams", "completely", "excess", "according",
-        "so", "will", "how", "many", "much", "when", "what", "which",
+        "use", "using", "used", "given", "calculate", "solve",
+        "since", "over", "under", "less", "greater", "equal",
+        "pure", "solid", "cubic", "centimeters", "grams",
+        "completely", "excess", "according", "so", "will",
+        "how", "many", "much", "when", "what", "which",
         "its", "has", "are", "was", "were", "been", "being",
+        # Structural operation terms added to stop list to eliminate remaining false positives
+        "divide", "divided", "dividing", "division", "by",
+        "multiply", "multiplied", "multiplying", "multiplication",
+        "add", "added", "adding", "addition",
+        "subtract", "subtracted", "subtracting", "subtraction",
+        "sum", "product", "difference", "ratio", "over", "plus", "minus", "times",
+        "value", "values", "step", "steps", "answer", "answers", "question", "questions"
     }
 
     def canonicalize(word: str) -> str:
         """Map word to its canonical synonym form, then stem."""
         w = word.lower().strip()
-        # Check synonym map first
         if w in SYNONYM_MAP:
             return SYNONYM_MAP[w]
-        # Then stem
         stemmed = simple_stem(w)
-        # Check if stemmed form has a synonym
         if stemmed in SYNONYM_MAP:
             return SYNONYM_MAP[stemmed]
         return stemmed
@@ -163,7 +166,7 @@ def smart_keyword_concepts(
         for w in raw:
             canon = canonicalize(w)
             if canon not in result:
-                result[canon] = w  # Keep original word for display
+                result[canon] = w
         return result
 
     ref_stems = extract_words(ref_text)
@@ -251,7 +254,7 @@ class EvaluatorService:
                 semantic_sim = 0.5
             logger.debug(f"Semantic similarity: {semantic_sim:.3f}")
 
-            # STEP 2: ALWAYS use smart keyword concepts (question-aware + synonyms)
+            # STEP 2: ALWAYS use smart keyword concepts (question-aware)
             concept_analysis = smart_keyword_concepts(
                 ref_text=request.reference_answer,
                 stu_text=request.student_answer,
@@ -294,7 +297,7 @@ class EvaluatorService:
             correctness  = max(0.0, min(1.0, correctness))
             relevance    = max(0.0, min(1.0, relevance))
             completeness = max(0.0, min(1.0, completeness))
-            clarity      = max(0.0, min(1.0, clarity))
+            clarity     = max(0.0, min(1.0, clarity))
 
             correctness_weighted  = correctness * 40.0
             relevance_weighted    = relevance * 20.0
@@ -352,14 +355,14 @@ class EvaluatorService:
                 "feedback":                feedback,
                 "improvement_suggestions": suggestions,
                 "subject_specific_notes":   llm_scores.get("reasoning", ""),
-                "semantic_similarity":     round(semantic_sim, 4),
+                "semantic_similarity":     round(correctness, 4),
                 "confidence_score":        round(confidence, 3),
                 "governance_status":       "flagged" if review_required else "passed",
                 "human_review_required":   review_required,
                 "model_used":              llm_scores.get("model_used", "openai/gpt-oss-20b"),
                 "provider":                llm_scores.get("provider", "groq"),
                 "processing_time_ms":      (time.time() - start_time) * 1000,
-                "prompt_version":          "3.0.0"
+                "prompt_version":          "3.5.0"
             }
 
             if db:
