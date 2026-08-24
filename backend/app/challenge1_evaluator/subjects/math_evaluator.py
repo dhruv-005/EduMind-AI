@@ -4,10 +4,9 @@ from typing import Dict, Any, List, Optional, Tuple
 from app.core.logger import logger
 from app.shared.llm_client import llm_client
 from app.challenge1_evaluator.prompts.evaluation_prompt import (
-    MATH_SYSTEM_PROMPT,
-    MATH_EVALUATION_PROMPT,
+    EVALUATION_SYSTEM_PROMPT,
+    MATH_SYSTEM_PROMPT
 )
-
 
 class MathEvaluator:
     """Strict mathematics evaluator with numerical and method verification."""
@@ -27,7 +26,6 @@ class MathEvaluator:
         if not text:
             return {}
         cleaned = text.replace('$', '').replace('\\', ' ')
-        # \b ensures we only match standalone variables (e.g. 'x = 2'), not word endings (e.g. 'width = 8')
         matches = re.findall(r'\b([a-zA-Z])\s*=\s*(-?\d+\.?\d*)', cleaned)
         result = {}
         for var, val in matches:
@@ -96,7 +94,6 @@ class MathEvaluator:
         ref_vars = self._extract_variable_values(ref_text)
         stu_vars = self._extract_variable_values(stu_text)
 
-        # Only compare variable mappings if it is explicitly an algebraic system
         if is_algebra and ref_vars and stu_vars:
             correct_vars = {}
             wrong_vars = {}
@@ -122,7 +119,6 @@ class MathEvaluator:
                 "type": "variables"
             }
 
-        # Fallback: compare single final numbers
         ref_final = self._extract_final_answer(ref_text)
         stu_final = self._extract_final_answer(stu_text)
 
@@ -182,23 +178,42 @@ class MathEvaluator:
             f"bodmas={bodmas_violation}"
         )
 
-        # LLM evaluation
-        prompt = MATH_EVALUATION_PROMPT.format(
-            question=question,
-            reference_answer=reference_answer,
-            student_answer=student_answer,
-        )
+        prompt = f"""You are a senior math examiner. Evaluate this student response strictly.
+
+QUESTION:
+{question}
+GRADE LEVEL: {grade_level}
+
+REFERENCE ANSWER:
+{reference_answer}
+
+STUDENT ANSWER:
+{student_answer}
+
+Return ONLY a valid JSON object matching this schema:
+{{
+  "correctness": <float 0.0 to 1.0>,
+  "relevance": <float 0.0 to 1.0>,
+  "completeness": <float 0.0 to 1.0>,
+  "clarity": <float 0.0 to 1.0>,
+  "correct_concepts": ["list of correct mathematical steps performed"],
+  "missing_concepts": ["list of missing steps or principles"],
+  "wrong_concepts": ["list of math errors, empty if none"],
+  "reasoning": "Scoring explanation",
+  "feedback": "Encouraging but mathematically precise feedback",
+  "improvement_suggestions": ["1 to 3 suggestions"]
+}}"""
 
         try:
             result = await llm_client.chat_async(
                 messages=[
-                    {"role": "system", "content": MATH_SYSTEM_PROMPT},
-                    {"role": "user",   "content": prompt},
+                    {"role": "system", "content": f"{EVALUATION_SYSTEM_PROMPT}\n\n{MATH_SYSTEM_PROMPT}"},
+                    {"role": "user", "content": prompt}
                 ],
                 max_tokens=1500,
-                temperature=0.1,
+                temperature=0.1
             )
-            raw = result.get("text", "")
+            raw = result["text"]
             start = raw.find('{')
             end = raw.rfind('}') + 1
             if start != -1 and end > start:
@@ -208,98 +223,33 @@ class MathEvaluator:
         except Exception as e:
             logger.error(f"Math LLM failed: {e}")
             llm_data = {
-                "correctness": 0.5, "relevance": 0.7,
-                "completeness": 0.5, "clarity": 0.6,
-                "reasoning": "LLM unavailable",
-                "feedback": "", "improvement_suggestions": [],
+                "correctness": 0.5, "relevance": 0.7, "completeness": 0.5, "clarity": 0.6,
+                "correct_concepts": [], "missing_concepts": [], "wrong_concepts": [],
+                "reasoning": "LLM failed", "feedback": "", "improvement_suggestions": [],
             }
-
-        llm_method_correct = llm_data.get("method_correct", None)
 
         # ── STRICT OVERRIDE ────────────────────────────────────
         if final_match and not bodmas_violation:
-            if llm_method_correct is True or llm_method_correct is None:
-                llm_data["correctness"] = max(llm_data.get("correctness", 0.5), 0.92)
-                llm_data["completeness"] = max(llm_data.get("completeness", 0.5), 0.85)
-                llm_data["relevance"] = max(llm_data.get("relevance", 0.5), 0.90)
-                llm_data["clarity"] = max(llm_data.get("clarity", 0.5), 0.85)
+            if method_correct:
+                llm_data["correctness"] = max(llm_data.get("correctness", 0.5), 0.95)
+                llm_data["completeness"] = max(llm_data.get("completeness", 0.5), 0.90)
                 llm_data["final_answer_correct"] = True
                 llm_data["method_correct"] = True
-
-                if not llm_data.get("feedback") or len(llm_data.get("feedback", "")) < 30:
-                    llm_data["feedback"] = (
-                        "Excellent work! Your final answer is correct and your method "
-                        "is sound. You showed clear step-by-step reasoning. Great job!"
-                    )
             else:
                 llm_data["correctness"] = min(max(llm_data.get("correctness", 0.5), 0.45), 0.55)
                 llm_data["completeness"] = min(llm_data.get("completeness", 1.0), 0.50)
-
-                llm_data["feedback"] = (
-                    f"Your final answer is correct, but your method has issues. "
-                    f"{llm_data.get('reasoning', '')} "
-                    f"Please review the expected procedural steps."
-                )
-
-            llm_data["final_answer_correct"] = True
-
-        elif not final_match:
-            llm_data["correctness"] = min(llm_data.get("correctness", 1.0), 0.10)
+                llm_data["final_answer_correct"] = True
+                llm_data["method_correct"] = False
+        else:
+            llm_data["correctness"] = min(llm_data.get("correctness", 1.0), 0.15)
             llm_data["completeness"] = min(llm_data.get("completeness", 1.0), 0.25)
             llm_data["final_answer_correct"] = False
+            llm_data["method_correct"] = False
 
-            if answer_details.get("type") == "variables":
-                wrong = answer_details.get("wrong_vars", {})
-                correct = answer_details.get("correct_vars", {})
-                parts = []
-                if correct:
-                    correct_str = ", ".join(f"{k}={v}" for k, v in correct.items())
-                    parts.append(f"You correctly found {correct_str}.")
-                if wrong:
-                    for var, vals in wrong.items():
-                        parts.append(
-                            f"However, {var}={vals['student']} is wrong — "
-                            f"the correct value is {var}={vals['correct']}."
-                        )
-                llm_data["feedback"] = " ".join(parts) + " Check your arithmetic in the substitution steps."
-            else:
-                ref_val = answer_details.get("ref_final", "?")
-                stu_val = answer_details.get("stu_final", "?")
-                llm_data["feedback"] = (
-                    f"Your final answer of {stu_val} is incorrect. "
-                    f"The correct answer is {ref_val}. "
-                    "Review each step of your calculation carefully."
-                )
-
-            if is_algebra:
-                llm_data["improvement_suggestions"] = [
-                    "Double-check your back-substitution arithmetic.",
-                    "After solving, plug your values back into ALL original equations to verify.",
-                    "Write each algebraic step on a separate line to avoid arithmetic slips.",
-                ]
-            elif bodmas_violation:
-                llm_data["improvement_suggestions"] = [
-                    "Follow BODMAS/PEMDAS: Brackets, Orders, Division, Multiplication, Addition, Subtraction.",
-                    "Perform multiplication and division BEFORE addition and subtraction.",
-                    "Write each step separately and verify the arithmetic.",
-                ]
-            else:
-                llm_data["improvement_suggestions"] = [
-                    "Re-check each arithmetic step carefully.",
-                    "Verify your final answer by substituting back into the original problem.",
-                    "Write each step on a separate line to catch errors early.",
-                ]
-
-        # Metadata
-        llm_data["reference_final_answer"] = answer_details
-        llm_data["student_final_answer"] = answer_details
-        llm_data.setdefault("relevance", 0.7)
-        llm_data.setdefault("clarity", 0.6)
-        llm_data.setdefault("improvement_suggestions", [])
-        llm_data.setdefault("feedback", "")
-        llm_data.setdefault("reasoning", "")
-
+        llm_data.setdefault("correct_concepts", [])
+        llm_data.setdefault("missing_concepts", [])
+        llm_data.setdefault("wrong_concepts", [])
         return llm_data
 
-
+# Singleton
 math_evaluator = MathEvaluator()

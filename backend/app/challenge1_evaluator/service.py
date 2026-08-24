@@ -1,27 +1,16 @@
 import uuid
 import time
 import json
-import re
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from app.core.logger import logger
 from app.core.config import settings
-from app.challenge1_evaluator.schemas import (
-    EvaluationRequest,
-    EvaluationResult,
-    ScoreBreakdown,
-    ConceptAnalysis
-)
-from app.challenge1_evaluator.concept_extractor import concept_extractor
-from app.challenge1_evaluator.scoring_engine import scoring_engine
-from app.challenge1_evaluator.feedback_generator import feedback_generator
+from app.challenge1_evaluator.schemas import EvaluationRequest
 from app.challenge1_evaluator.subjects.math_evaluator import math_evaluator
 from app.challenge1_evaluator.subjects.science_evaluator import science_evaluator
 from app.challenge1_evaluator.subjects.english_evaluator import english_evaluator
 from app.challenge1_evaluator.subjects.general_evaluator import general_evaluator
 from app.governance.audit_logger import audit_logger
-from app.governance.human_oversight import human_oversight
-from app.governance.prompt_versioning import prompt_versioning
 from app.governance.bias_detector import bias_detector
 from app.models.evaluation import Evaluation
 
@@ -43,168 +32,8 @@ def get_grade_info(score_out_of_10: float) -> Dict[str, str]:
     return {"grade": "F", "label": "Fail"}
 
 
-def simple_stem(word: str) -> str:
-    """Basic English stemmer."""
-    w = word.lower().strip()
-    if len(w) <= 3:
-        return w
-    for suffix in ['tion', 'sion', 'ment', 'ness', 'ence', 'ance',
-                   'ally', 'ible', 'able', 'ying', 'ting',
-                   'ning', 'ding', 'ling', 'ring', 'sing',
-                   'ing', 'ies', 'ers', 'ous', 'ive', 'ful',
-                   'less', 'ward', 'like', 'wise',
-                   'ed', 'er', 'ly', 'al', 'es', 'or',
-                   'ty', 'ry', 'cy', 'gy', 'fy', 'ar',
-                   's']:
-        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
-            return w[:-len(suffix)]
-    return w
-
-
-# Synonym groups — words that mean the same thing
-SYNONYM_GROUPS = [
-    ["equation", "reaction", "expression"],
-    ["formula", "formulas"],
-    ["float", "floats", "floating", "buoyant"],
-    ["sink", "sinks", "sinking"],
-    ["divide", "divided", "dividing", "division"],
-    ["multiply", "multiplied", "multiplying", "multiplication"],
-    ["add", "added", "adding", "addition"],
-    ["subtract", "subtracted", "subtracting", "subtraction"],
-    ["substitute", "substituted", "substituting", "substitution"],
-    ["calculate", "calculated", "calculating", "calculation"],
-    ["convert", "converted", "converting", "conversion"],
-    ["produce", "produced", "producing", "production"],
-    ["identify", "identified", "identifying", "identification"],
-    ["expand", "expanded", "expanding", "expansion"],
-    ["simplify", "simplified", "simplifying"],
-    ["solve", "solved", "solving", "solution"],
-    ["isolate", "isolated", "isolating"],
-    ["balance", "balanced", "balancing"],
-    ["compare", "compared", "comparing", "comparison"],
-    ["determine", "determined", "determining"],
-    ["express", "expressed", "expressing"],
-    ["water", "h2o"],
-    ["hydrogen", "h2"],
-    ["oxygen", "o2"],
-    ["mass", "masses", "weight"],
-    ["mole", "moles", "mol"],
-    ["density", "densities"],
-    ["volume", "volumes"],
-    ["ratio", "ratios", "proportion"],
-    ["coefficient", "coefficients"],
-    ["stoichiometric", "stoichiometry"],
-    ["molar", "molar mass"],
-    ["gram", "grams", "g"],
-    ["centimeter", "centimeters", "cm"],
-    ["object", "objects", "block", "body"],
-    ["wooden", "wood"],
-    ["pure", "pure water"],
-    ["excess", "excess oxygen"],
-    ["complete", "completely", "complete reaction"],
-]
-
-# Build lookup: word -> canonical form
-SYNONYM_MAP = {}
-for group in SYNONYM_GROUPS:
-    canonical = group[0]
-    for word in group:
-        SYNONYM_MAP[word] = canonical
-
-
-def smart_keyword_concepts(
-    ref_text: str, stu_text: str, question_text: str = ""
-) -> Dict[str, Any]:
-    """Smart concept matching with stemming, synonyms, and question-awareness."""
-    stop_words = {
-        "the", "and", "for", "that", "this", "with", "from", "are",
-        "was", "were", "her", "his", "she", "him", "its", "not",
-        "but", "all", "can", "has", "had", "may", "been", "will",
-        "each", "which", "their", "what", "when", "where", "how",
-        "into", "than", "also", "just", "back", "both", "some",
-        "then", "them", "these", "those", "more", "most", "other",
-        "such", "only", "own", "same", "too", "very", "after",
-        "before", "between", "through", "during", "above", "below",
-        "about", "against", "further", "once", "here", "there",
-        "any", "few", "much", "many", "well", "now", "even",
-        "new", "want", "because", "going", "get", "got", "make",
-        "like", "long", "still", "find", "know", "take", "come",
-        "could", "would", "should", "does", "did", "let", "say",
-        "one", "two", "three", "four", "five", "six", "seven",
-        "eight", "nine", "ten", "first", "second", "third",
-        "use", "using", "used", "given", "calculate", "solve",
-        "since", "over", "under", "less", "greater", "equal",
-        "pure", "solid", "cubic", "centimeters", "grams",
-        "completely", "excess", "according", "so", "will",
-        "how", "many", "much", "when", "what", "which",
-        "its", "has", "are", "was", "were", "been", "being",
-        "divide", "divided", "dividing", "division", "by",
-        "multiply", "multiplied", "multiplying", "multiplication",
-        "add", "added", "adding", "addition",
-        "subtract", "subtracted", "subtracting", "subtraction",
-        "sum", "product", "difference", "ratio", "over", "plus", "minus", "times",
-        "value", "values", "step", "steps", "answer", "answers", "question", "questions",
-        "square", "squares", "centimeter", "centimeters", "cubic", "grams", "gram",
-        "world", "main", "main causes", "main factors",
-        "you", "your", "they", "he", "she", "it", "we", "our",
-        "your", "my", "me", "i", "a", "an",
-    }
-
-    def canonicalize(word: str) -> str:
-        w = word.lower().strip()
-        if w in SYNONYM_MAP:
-            return SYNONYM_MAP[w]
-        stemmed = simple_stem(w)
-        if stemmed in SYNONYM_MAP:
-            return SYNONYM_MAP[stemmed]
-        return stemmed
-
-    def extract_words(text):
-        raw = set(re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())) - stop_words
-        result = {}
-        for w in raw:
-            canon = canonicalize(w)
-            if canon not in result:
-                result[canon] = w
-        return result
-
-    ref_stems = extract_words(ref_text)
-    stu_stems = extract_words(stu_text)
-    q_stems = extract_words(question_text) if question_text else {}
-
-    combined_ref = dict(ref_stems)
-    combined_ref.update(q_stems)
-
-    ref_nums = set(re.findall(r'\b\d+\.?\d*\b', ref_text))
-    stu_nums = set(re.findall(r'\b\d+\.?\d*\b', stu_text))
-    q_nums = set(re.findall(r'\b\d+\.?\d*\b', question_text)) if question_text else set()
-
-    correct_stems = set(combined_ref.keys()) & set(stu_stems.keys())
-    correct = list(set(combined_ref[s] for s in correct_stems))
-
-    missing_stems = set(ref_stems.keys()) - set(stu_stems.keys())
-    missing = list(set(ref_stems[s] for s in missing_stems))
-
-    # Numbers
-    correct += list(ref_nums & stu_nums)
-    missing += list(ref_nums - stu_nums - q_nums)
-
-    total_expected = len(ref_stems) + len(ref_nums)
-    total_found = len(correct)
-    coverage = (total_found / max(total_expected, 1)) * 100.0
-
-    return {
-        "correct_concepts": correct[:10],
-        "missing_concepts": missing[:10],
-        "wrong_concepts": [], # Set to empty list to prevent local false-positives
-        "total_expected": total_expected,
-        "total_found": total_found,
-        "coverage_percentage": round(coverage, 1)
-    }
-
-
 class EvaluatorService:
-    """Main evaluation service."""
+    """Master evaluator service across all subjects."""
 
     def _get_subject_evaluator(self, subject: str):
         evaluators = {
@@ -218,7 +47,6 @@ class EvaluatorService:
             "general":     general_evaluator,
             "history":     general_evaluator,
             "geography":   general_evaluator,
-            "economics":   general_evaluator,
         }
         return evaluators.get(subject.lower(), general_evaluator)
 
@@ -235,23 +63,7 @@ class EvaluatorService:
         logger.info(f"Starting evaluation: id={request_id} subject={request.subject}")
 
         try:
-            # STEP 1: Semantic similarity
-            try:
-                semantic_sim = scoring_engine.calculate_semantic_score(
-                    request.student_answer, request.reference_answer
-                )
-            except Exception:
-                semantic_sim = 0.5
-            logger.debug(f"Semantic similarity: {semantic_sim:.3f}")
-
-            # STEP 2: ALWAYS use smart keyword concepts (question-aware)
-            concept_analysis = smart_keyword_concepts(
-                ref_text=request.reference_answer,
-                stu_text=request.student_answer,
-                question_text=request.question
-            )
-
-            # STEP 3: Subject-specific LLM evaluation (Primary Scoring Source)
+            # 1. Subject-specific LLM evaluation with intelligent concept extraction
             subject_evaluator = self._get_subject_evaluator(request.subject)
             llm_scores = await subject_evaluator.evaluate(
                 question=request.question,
@@ -259,75 +71,64 @@ class EvaluatorService:
                 student_answer=request.student_answer,
                 grade_level=request.grade_level
             )
-            logger.debug(f"LLM scores: {llm_scores}")
 
-            # Overwrite programmatic wrong concepts with true LLM-derived errors
-            # This completely stops false positives like "breaking" or "carbon" from showing as incorrect!
-            concept_analysis["wrong_concepts"] = llm_scores.get("wrong_concepts") or []
+            # 2. Extract scores (0.0 to 1.0 scale)
+            correctness = float(llm_scores.get("correctness", 0.5))
+            relevance   = float(llm_scores.get("relevance", 0.5))
+            completeness= float(llm_scores.get("completeness", 0.5))
+            clarity     = float(llm_scores.get("clarity", 0.5))
 
-            # Recalculate true coverage percentage based on actual accurate concepts
-            correct_len = len(concept_analysis["correct_concepts"])
-            missing_len = len(concept_analysis["missing_concepts"])
-            total_expected = correct_len + missing_len
-            concept_analysis["total_expected"] = total_expected
-            concept_analysis["total_found"] = correct_len
-            concept_analysis["coverage_percentage"] = round((correct_len / max(1, total_expected)) * 100.0, 1)
-
-            concept_coverage = concept_analysis.get("coverage_percentage", 50.0) / 100.0
-            logger.debug(f"Concept coverage (true display): {concept_analysis.get('coverage_percentage', 0)}%")
-
-            # STEP 4: Score aggregation
-            # Direct transparent assignment from LLM scoring output to prevent mathematical dampening
-            correctness  = float(llm_scores.get("correctness", 0.5))
-            completeness = float(llm_scores.get("completeness", 0.5))
-            relevance    = float(llm_scores.get("relevance", 0.5))
-            clarity      = float(llm_scores.get("clarity", 0.5))
-
+            # Apply strict mode multiplier if requested
             if request.strict_mode:
-                correctness = min(correctness, correctness * 0.85)
+                correctness = correctness * 0.85
 
-            # Clamp limits safely
+            # Clamp scores strictly between 0.0 and 1.0
             correctness  = max(0.0, min(1.0, correctness))
             relevance    = max(0.0, min(1.0, relevance))
             completeness = max(0.0, min(1.0, completeness))
-            clarity      = max(0.0, min(1.0, clarity))
+            clarity     = max(0.0, min(1.0, clarity))
 
-            # Convert to weighted values
+            # 3. Calculate weighted scores (40 + 20 + 25 + 15 = 100 max)
             correctness_weighted  = correctness * 40.0
             relevance_weighted    = relevance * 20.0
             completeness_weighted = completeness * 25.0
             clarity_weighted      = clarity * 15.0
 
             total_score = (
-                correctness_weighted + relevance_weighted +
-                completeness_weighted + clarity_weighted
+                correctness_weighted +
+                relevance_weighted +
+                completeness_weighted +
+                clarity_weighted
             )
             score_out_of_10 = total_score / 10.0
             grade_info = get_grade_info(score_out_of_10)
 
-            # Construct feedback
-            feedback = llm_scores.get("feedback", "")
-            if not feedback or len(feedback) < 20:
-                feedback = (
-                    f"Your answer scored {score_out_of_10:.1f}/10. "
-                    "Review the reference solution for missing details."
-                )
+            # 4. Use clean, high-precision concepts from the subject evaluator
+            correct_concepts = llm_scores.get("correct_concepts") or []
+            missing_concepts = llm_scores.get("missing_concepts") or []
+            wrong_concepts   = llm_scores.get("wrong_concepts") or []
 
-            suggestions = llm_scores.get("improvement_suggestions", [])
-            if not suggestions:
-                suggestions = ["Review the core concepts of this question."]
+            # Calculate actual coverage percentage
+            total_concepts = len(correct_concepts) + len(missing_concepts)
+            coverage_pct = round((len(correct_concepts) / max(1, total_concepts)) * 100.0, 1)
 
-            final_correct = llm_scores.get("final_answer_correct", None)
-            if final_correct is True:
-                confidence = 0.90
-            elif final_correct is False:
-                confidence = 0.85
-            else:
-                confidence = max(0.70, (correctness * 0.6) + (completeness * 0.4))
+            concept_analysis = {
+                "correct_concepts": correct_concepts,
+                "missing_concepts": missing_concepts,
+                "wrong_concepts": wrong_concepts,
+                "total_expected": total_concepts,
+                "total_found": len(correct_concepts),
+                "coverage_percentage": coverage_pct
+            }
 
-            confidence = max(0.0, min(1.0, confidence))
-            review_required = confidence < getattr(settings, 'HUMAN_REVIEW_THRESHOLD', 0.6)
+            feedback = llm_scores.get("feedback") or "Evaluation complete."
+            suggestions = llm_scores.get("improvement_suggestions") or ["Keep practicing to refine your problem-solving process."]
 
+            # 5. Governance and Confidence calculations
+            confidence = round(max(0.70, (correctness * 0.5) + (completeness * 0.3) + (clarity * 0.2)), 2)
+            review_required = confidence < getattr(settings, 'HUMAN_REVIEW_THRESHOLD', 0.60) or (len(wrong_concepts) > 3)
+
+            # Check for bias safely
             try:
                 bias_detector.scan_text(request.student_answer + " " + feedback)
             except Exception:
@@ -350,8 +151,8 @@ class EvaluatorService:
                 "feedback":                feedback,
                 "improvement_suggestions": suggestions,
                 "subject_specific_notes":   llm_scores.get("reasoning", ""),
-                "semantic_similarity":     round(semantic_sim, 4),
-                "confidence_score":        round(confidence, 3),
+                "semantic_similarity":     round(correctness, 4),
+                "confidence_score":        confidence,
                 "governance_status":       "flagged" if review_required else "passed",
                 "human_review_required":   review_required,
                 "model_used":              llm_scores.get("model_used", "openai/gpt-oss-20b"),
@@ -360,9 +161,11 @@ class EvaluatorService:
                 "prompt_version":          "4.0.0"
             }
 
+            # Persist to database if provided
             if db:
                 self._save_evaluation(db, result_payload, request, user_id)
 
+            # Log audit trail
             try:
                 audit_logger.log_ai_decision(
                     db=db,
@@ -377,15 +180,15 @@ class EvaluatorService:
                     metadata={"subject": request.subject, "human_review": review_required}
                 )
             except Exception as e:
-                logger.error(f"Audit log failed (non-critical): {e}")
+                logger.error(f"Audit logger failed (non-critical): {e}")
 
             return result_payload
 
         except Exception as e:
-            logger.error(f"Evaluation failed: {e}")
+            logger.error(f"Evaluation process failed: {e}")
             raise
 
-    def _save_evaluation(self, db, result, request, user_id):
+    def _save_evaluation(self, db: Session, result: dict, request: EvaluationRequest, user_id: Optional[str]):
         try:
             eval_model = Evaluation(
                 id=str(uuid.uuid4()),
@@ -420,10 +223,9 @@ class EvaluatorService:
             )
             db.add(eval_model)
             db.commit()
-            logger.info(f"Evaluation saved: {eval_model.id}")
+            logger.info(f"Evaluation record stored in DB: {eval_model.id}")
         except Exception as e:
             db.rollback()
-            logger.error(f"DB save failed: {e}")
-
+            logger.error(f"Failed to commit evaluation to DB: {e}")
 
 evaluator_service = EvaluatorService()
