@@ -1,196 +1,86 @@
 /* ============================================================
    EDUMIND AI — AUDIO PLAYER HOOK
-   For TTS response playback with interruption support
+   For TTS playback with instant interruption
    ============================================================ */
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { base64ToBlob } from '@utils/audioUtils'
-import { devLog } from '@utils/helpers'
 
 export function useAudioPlayer({
-  onPlayStart    = null,
-  onPlayEnd      = null,
-  onInterrupt    = null,
+  onPlayStart = null,
+  onPlayEnd   = null,
+  onInterrupt = null,
 } = {}) {
-  const [isPlaying, setIsPlaying]   = useState(false)
-  const [duration, setDuration]     = useState(0)
-  const [currentTime, setCurrentTime] = useState(0)
-  const [error, setError]           = useState(null)
+  const [isPlaying, setIsPlaying] = useState(false)
+  const audioRef    = useRef(null)
+  const audioUrlRef = useRef(null)
 
-  const audioRef      = useRef(null)
-  const audioUrlRef   = useRef(null)
-  const timeTimerRef  = useRef(null)
-
-  // Clear current audio
   const clearAudio = useCallback(() => {
-    if (timeTimerRef.current) {
-      clearInterval(timeTimerRef.current)
-      timeTimerRef.current = null
-    }
-
     if (audioRef.current) {
-      audioRef.current.pause()
-      audioRef.current.src = ''
+      try {
+        audioRef.current.pause()
+        audioRef.current.src = ''
+      } catch (_) {}
       audioRef.current = null
     }
-
     if (audioUrlRef.current) {
       URL.revokeObjectURL(audioUrlRef.current)
       audioUrlRef.current = null
     }
-
     setIsPlaying(false)
-    setCurrentTime(0)
-    setDuration(0)
   }, [])
 
-  // Play from base64 string
-  const playBase64 = useCallback(
-    async (base64, mimeType = 'audio/mpeg') => {
-      setError(null)
+  const playBase64 = useCallback(async (base64String, mimeType = 'audio/mpeg') => {
+    if (!base64String || typeof base64String !== 'string') return
 
-      // Stop any current playback
-      clearAudio()
+    clearAudio()
 
-      try {
-        const blob = base64ToBlob(base64, mimeType)
-        const url  = URL.createObjectURL(blob)
-        audioUrlRef.current = url
+    try {
+      const blob = base64ToBlob(base64String, mimeType)
+      if (blob.size === 0) return
 
-        const audio = new Audio(url)
-        audioRef.current = audio
+      const url = URL.createObjectURL(blob)
+      audioUrlRef.current = url
 
-        // Events
-        audio.onloadedmetadata = () => {
-          setDuration(audio.duration)
-        }
+      const audio = new Audio(url)
+      audioRef.current = audio
 
-        audio.onplay = () => {
-          devLog('Audio: Playing')
-          setIsPlaying(true)
-          if (onPlayStart) onPlayStart()
+      audio.onplay = () => {
+        setIsPlaying(true)
+        if (onPlayStart) onPlayStart()
+      }
 
-          // Track current time
-          timeTimerRef.current = setInterval(() => {
-            setCurrentTime(audio.currentTime)
-          }, 200)
-        }
+      audio.onended = () => {
+        clearAudio()
+        if (onPlayEnd) onPlayEnd()
+      }
 
-        audio.onended = () => {
-          devLog('Audio: Ended')
-          clearAudio()
-          if (onPlayEnd) onPlayEnd()
-        }
-
-        audio.onerror = (e) => {
-          devLog('Audio: Error', e)
-          setError('Audio playback error')
-          clearAudio()
-        }
-
-        await audio.play()
-      } catch (err) {
-        setError(err.message || 'Playback failed')
+      audio.onerror = () => {
         clearAudio()
       }
-    },
-    [clearAudio, onPlayStart, onPlayEnd]
-  )
 
-  // Play from URL
-  const playUrl = useCallback(
-    async (url) => {
-      setError(null)
+      await audio.play()
+    } catch (err) {
+      console.warn('Audio playback error / blocked by autoplay policy:', err)
       clearAudio()
+    }
+  }, [clearAudio, onPlayStart, onPlayEnd])
 
-      try {
-        const audio = new Audio(url)
-        audioRef.current = audio
-
-        audio.onloadedmetadata = () => setDuration(audio.duration)
-
-        audio.onplay = () => {
-          setIsPlaying(true)
-          if (onPlayStart) onPlayStart()
-          timeTimerRef.current = setInterval(() => {
-            setCurrentTime(audio.currentTime)
-          }, 200)
-        }
-
-        audio.onended = () => {
-          clearAudio()
-          if (onPlayEnd) onPlayEnd()
-        }
-
-        audio.onerror = () => {
-          setError('Audio playback error')
-          clearAudio()
-        }
-
-        await audio.play()
-      } catch (err) {
-        setError(err.message)
-        clearAudio()
-      }
-    },
-    [clearAudio, onPlayStart, onPlayEnd]
-  )
-
-  // Interrupt playback immediately
   const interrupt = useCallback(() => {
     if (isPlaying) {
-      devLog('Audio: Interrupted by user')
       clearAudio()
       if (onInterrupt) onInterrupt()
     }
   }, [isPlaying, clearAudio, onInterrupt])
 
-  // Pause
-  const pause = useCallback(() => {
-    if (audioRef.current && isPlaying) {
-      audioRef.current.pause()
-      setIsPlaying(false)
-      if (timeTimerRef.current) {
-        clearInterval(timeTimerRef.current)
-        timeTimerRef.current = null
-      }
-    }
-  }, [isPlaying])
-
-  // Resume
-  const resume = useCallback(() => {
-    if (audioRef.current && !isPlaying) {
-      audioRef.current.play()
-    }
-  }, [isPlaying])
-
-  // Set volume
-  const setVolume = useCallback((vol) => {
-    if (audioRef.current) {
-      audioRef.current.volume = Math.min(1, Math.max(0, vol))
-    }
-  }, [])
-
-  // Cleanup
   useEffect(() => {
     return () => clearAudio()
   }, [clearAudio])
 
-  // Progress percentage
-  const progress = duration > 0 ? (currentTime / duration) * 100 : 0
-
   return {
     isPlaying,
-    duration,
-    currentTime,
-    progress,
-    error,
     playBase64,
-    playUrl,
     interrupt,
-    pause,
-    resume,
-    setVolume,
     stop: clearAudio,
   }
 }
