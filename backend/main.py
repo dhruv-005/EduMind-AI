@@ -2,6 +2,7 @@ import uuid as _uuid
 import os
 import re
 import json
+import base64
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File as FastAPIFile, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,13 +16,15 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info("=" * 60)
 
+    # Database
     try:
         from app.core.database import create_tables
         create_tables()
         logger.info("Database tables ready")
     except Exception as e:
-        logger.warning(f"Database: {e}")
+        logger.warning(f"Database setup failed: {e}")
 
+    # Redis
     try:
         from app.core.redis_client import get_async_redis
         await get_async_redis()
@@ -29,16 +32,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Redis not available — running without cache")
 
-    logger.info("Heavy models will load lazily on first request")
+    # Skip heavy model preloading on startup to save memory on 512MB free tier hosts
+    logger.info("Heavy model preloading skipped to optimize memory. Models will load lazily on first request.")
 
+    # Upload directories
     for folder in [
         "uploads", "uploads/spelling", "uploads/papers",
-        "uploads/documents", "uploads/catalogues"
+        "uploads/documents", "uploads/catalogues", "uploads/audio"
     ]:
         os.makedirs(folder, exist_ok=True)
     logger.info("Upload directories ready")
 
     logger.info(f"{settings.APP_NAME} started successfully!")
+    logger.info(f"API docs: http://localhost:8000/docs")
     logger.info("=" * 60)
 
     yield
@@ -58,7 +64,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -88,7 +94,7 @@ async def root():
     }
 
 
-# ── GENERATOR — DIRECT (registered BEFORE router to take priority) ─
+# ── GENERATOR — DIRECT (JSON parse fix active) ────────────────────
 @app.post("/api/v1/generator/generate")
 async def generator_generate(request: Request):
     """
@@ -146,7 +152,6 @@ async def generator_generate(request: Request):
             line = line.strip()
             if not line:
                 continue
-            # Match "1. " "1) " "Q1." "Q1:" etc
             match = re.match(r'^(?:Q?\d+[.):\s]+)(.{10,})', line)
             if match:
                 q_text = match.group(1).strip()
@@ -245,10 +250,10 @@ async def spelling_detect(file: UploadFile = FastAPIFile(...)):
     errors = []
     try:
         from spellchecker import SpellChecker
-        spell      = SpellChecker()
-        words      = re.findall(r'\b[a-zA-Z]{3,}\b', text)
+        spell = SpellChecker()
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', text)
         misspelled = spell.unknown(words)
-        seen       = set()
+        seen = set()
         for word in misspelled:
             clean = word.lower().strip()
             if clean in seen or len(clean) < 3 or word.isupper():
@@ -286,17 +291,42 @@ async def spelling_detect(file: UploadFile = FastAPIFile(...)):
     }
 
 
-# ── WEBSOCKET VOICE TUTOR ─────────────────────────────────────────
+# ── WEBSOCKET — VOICE TUTOR (STT + TTS ACTIVE) ───────────────────
 @app.websocket("/api/v1/voice-tutor/ws/{session_id}")
 async def voice_tutor_ws(websocket: WebSocket, session_id: str):
+    """WebSocket for real-time voice tutor communication with actual STT & TTS."""
     await websocket.accept()
+    logger.info(f"WebSocket connected: session={session_id}")
+
+    # Ensure audio temp directories exist
+    os.makedirs("uploads/audio", exist_ok=True)
+
     try:
+        # Initial Welcome Message via Edge-TTS
+        welcome_text = "Hello! I am your Socratic AI tutor. What would you like to learn today?"
+        welcome_audio_base64 = None
+
+        try:
+            import edge_tts
+            welcome_audio_path = f"uploads/audio/welcome_{session_id}.mp3"
+            communicate = edge_tts.Communicate(welcome_text, settings.TTS_VOICE)
+            await communicate.save(welcome_audio_path)
+            with open(welcome_audio_path, "rb") as f:
+                welcome_audio_base64 = base64.b64encode(f.read()).decode("utf-8")
+            os.remove(welcome_audio_path)
+        except Exception as e:
+            logger.warning(f"Initial welcome TTS failed: {e}")
+
         await websocket.send_json({
             "type":       "connected",
             "session_id": session_id,
+            "text":       welcome_text,
+            "audio":      welcome_audio_base64,
             "message":    "Voice tutor ready!",
         })
+
         while True:
+            # Receive message
             try:
                 raw  = await websocket.receive_text()
                 data = json.loads(raw)
@@ -308,41 +338,101 @@ async def voice_tutor_ws(websocket: WebSocket, session_id: str):
                 break
 
             msg_type = data.get("type", "text")
+            logger.info(f"WS received: type={msg_type} session={session_id[:8]}")
 
             if msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
                 continue
 
-            if msg_type in ("audio", "text"):
-                question = data.get("text", data.get("transcript", "Can you explain this concept?"))
-                await websocket.send_json({"type": "transcript", "text": question})
+            question = ""
+
+            # ── 1. SPEECH-TO-TEXT (STT) ──────────────────────────
+            if msg_type == "audio" and data.get("audio"):
+                logger.info("Processing voice recording via Whisper...")
+                audio_data = base64.b64decode(data["audio"])
+                audio_format = data.get("format", "wav")
+                
+                temp_audio_path = f"uploads/audio/input_{session_id}.{audio_format}"
+                with open(temp_audio_path, "wb") as f:
+                    f.write(audio_data)
+
                 try:
-                    from app.shared.llm_client import llm_client
-                    response_text = llm_client.simple_prompt(
-                        prompt=f"Student question: {question}\nRespond as a Socratic AI tutor. Give hints not direct answers.",
-                        system="You are an expert AI tutor. Guide with hints. Keep under 150 words.",
-                        max_tokens=200,
-                        temperature=0.7,
-                    )
-                except Exception:
-                    response_text = "Great question! What do you already know about this topic?"
-                await websocket.send_json({
-                    "type":       "response",
-                    "text":       response_text,
-                    "audio":      None,
-                    "topic":      data.get("subject", "general"),
-                    "session_id": session_id,
-                })
+                    from groq import Groq
+                    groq_client = Groq(api_key=settings.GROQ_API_KEY)
+                    with open(temp_audio_path, "rb") as file_obj:
+                        transcription = groq_client.audio.transcriptions.create(
+                            file=(os.path.basename(temp_audio_path), file_obj.read()),
+                            model="whisper-large-v3",
+                            response_format="json"
+                        )
+                    question = transcription.text
+                    logger.info(f"Whisper STT transcription: '{question}'")
+                except Exception as e:
+                    logger.error(f"Whisper STT failed: {e}")
+                    question = ""
+                finally:
+                    if os.path.exists(temp_audio_path):
+                        os.remove(temp_audio_path)
+
+            elif msg_type == "text":
+                question = data.get("text", data.get("message", ""))
+
+            if not question:
+                continue
+
+            # Confirm transcript back to browser
+            await websocket.send_json({
+                "type": "transcript",
+                "text": question,
+            })
+
+            # ── 2. SOCRATIC AI RESPONSE (LLM) ───────────────────
+            try:
+                from app.shared.llm_client import llm_client
+                response_text = llm_client.simple_prompt(
+                    prompt=f"Student question: {question}\n\nRespond as a Socratic AI tutor. Ask guiding questions or give hints.",
+                    system="You are an expert Socratic AI tutor. Never give direct answers. Guide with questions. Under 150 words.",
+                    max_tokens=200,
+                    temperature=0.7,
+                )
+            except Exception as e:
+                logger.warning(f"Socratic LLaMA failed: {e}")
+                response_text = f"That’s a great question about '{question}'. What do you think is the first step?"
+
+            # ── 3. TEXT-TO-SPEECH (TTS) ──────────────────────────
+            response_audio_base64 = None
+            try:
+                import edge_tts
+                temp_output_path = f"uploads/audio/output_{session_id}.mp3"
+                communicate = edge_tts.Communicate(response_text, settings.TTS_VOICE)
+                await communicate.save(temp_output_path)
+                with open(temp_output_path, "rb") as f:
+                    response_audio_base64 = base64.b64encode(f.read()).decode("utf-8")
+                os.remove(temp_output_path)
+                logger.info("Response Edge-TTS generated successfully")
+            except Exception as e:
+                logger.warning(f"Response Edge-TTS failed: {e}")
+
+            # Send back both Text and Voice
+            await websocket.send_json({
+                "type":       "response",
+                "text":       response_text,
+                "audio":      response_audio_base64,
+                "topic":      data.get("subject", "general"),
+                "session_id": session_id,
+            })
+
     except WebSocketDisconnect:
-        pass
+        logger.info(f"WebSocket disconnected: session={session_id[:8]}")
     except Exception as e:
+        logger.error(f"WebSocket error: {e}")
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
         except Exception:
             pass
 
 
-# ── VOICE TUTOR REST ──────────────────────────────────────────────
+# ── VOICE TUTOR REST ENDPOINTS ────────────────────────────────────
 @app.post("/api/v1/voice-tutor/session")
 async def voice_tutor_create_session(request: dict = None):
     data       = request or {}
@@ -356,7 +446,7 @@ async def voice_tutor_create_session(request: dict = None):
             "status":      "active",
             "ws_url":      f"/api/v1/voice-tutor/ws/{session_id}",
         },
-        "message": "Session created",
+        "message": "Session created successfully",
         "error":   None,
     }
 
@@ -409,7 +499,7 @@ async def voice_tutor_history():
     }
 
 
-# ── SALES ─────────────────────────────────────────────────────────
+# ── SALES ENDPOINTS ───────────────────────────────────────────────
 @app.post("/api/v1/sales/conversation")
 async def sales_start_conversation():
     return {
@@ -424,15 +514,19 @@ async def sales_start_conversation():
 async def sales_chat(request: dict):
     message = request.get("message", "")
     conv_id = request.get("conversation_id", "")
+
     try:
         from app.shared.llm_client import llm_client
         response_text = llm_client.simple_prompt(
-            prompt=f"Customer: {message}\nRespond as educational sales assistant. Recommend products.",
-            system="You are a sales assistant for EduMind AI. Be concise and friendly.",
+            prompt=(
+                f"Customer: {message}\nRespond as educational sales assistant. Recommend products.",
+                f"system: You are a sales assistant for EduMind AI. Be concise and friendly."
+            ),
             max_tokens=300,
             temperature=0.7,
         )
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Sales LLM failed: {e}")
         msg_lower = message.lower()
         if any(w in msg_lower for w in ['budget', 'price', 'cost']):
             response_text = "We have:\n💰 SmartLearn Basic — ₹2,499/year\n⭐ EduPro Premium — ₹4,999/year\n🏆 AcademyX — ₹7,999/year\nWhich suits you?"
@@ -493,7 +587,7 @@ async def sales_follow_up(conv_id: str):
         "data": {
             "email": (
                 "Subject: Thank you for exploring EduMind AI!\n\n"
-                "Dear Customer,\n\n"
+                "Dear Valued Customer,\n\n"
                 "I recommend EduPro Premium (Rs.4,999):\n"
                 "- AI tutoring\n- Analytics\n- Parent dashboard\n\n"
                 "Reply for free demo!\n\nEduMind AI Team"
@@ -536,7 +630,6 @@ async def sales_escalate(conv_id: str):
 
 
 # ── ROUTERS ───────────────────────────────────────────────────────
-# NOTE: evaluator router loaded FIRST — it has its own /api/v1/evaluator prefix
 try:
     from app.challenge1_evaluator.router import router as evaluator_router
     app.include_router(evaluator_router)
@@ -544,9 +637,6 @@ try:
 except Exception as e:
     logger.warning(f"Evaluator router failed: {e}")
 
-# NOTE: Generator router DISABLED — using direct endpoint above instead
-# The direct endpoint above handles /api/v1/generator/generate
-# and avoids JSON parse issues
 logger.info("Generator using direct endpoint (JSON parse fix active)")
 
 try:
