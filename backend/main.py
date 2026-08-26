@@ -62,6 +62,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS — use settings.ALLOWED_ORIGINS to safely support allow_credentials=True
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
@@ -268,13 +269,19 @@ async def spelling_detect(file: UploadFile = FastAPIFile(...)):
                     "confidence": 0.9,
                     "position":   {"x": 0, "y": 0},
                 })
+        logger.info(f"Spell check: {len(words)} words, {len(errors)} errors")
+    except ImportError:
+        logger.error("pyspellchecker not installed")
     except Exception as e:
         logger.error(f"Spell check error: {e}")
+
     try:
         os.remove(file_path)
     except Exception:
         pass
+
     total_words = len(text.split()) if text.strip() else 0
+
     return {
         "success": True,
         "data": {
@@ -434,8 +441,9 @@ async def voice_tutor_ws(websocket: WebSocket, session_id: str):
 
 # ── VOICE TUTOR REST ENDPOINTS ────────────────────────────────────
 @app.post("/api/v1/voice-tutor/session")
-async def voice_tutor_create_session(request: dict = None):
-    data       = request or {}
+async def voice_tutor_create_session(payload: dict = None):
+    """Create a new voice tutor session — resolved request argument conflict."""
+    data       = payload or {}
     session_id = str(_uuid.uuid4())
     return {
         "success": True,
@@ -511,9 +519,10 @@ async def sales_start_conversation():
 
 
 @app.post("/api/v1/sales/chat")
-async def sales_chat(request: dict):
-    message = request.get("message", "")
-    conv_id = request.get("conversation_id", "")
+async def sales_chat(payload: dict):
+    """Sales chat endpoint — resolved request parameter conflict."""
+    message = payload.get("message", "")
+    conv_id = payload.get("conversation_id", "")
 
     try:
         from app.shared.llm_client import llm_client
@@ -587,7 +596,7 @@ async def sales_follow_up(conv_id: str):
         "data": {
             "email": (
                 "Subject: Thank you for exploring EduMind AI!\n\n"
-                "Dear Valued Customer,\n\n"
+                "Dear Customer,\n\n"
                 "I recommend EduPro Premium (Rs.4,999):\n"
                 "- AI tutoring\n- Analytics\n- Parent dashboard\n\n"
                 "Reply for free demo!\n\nEduMind AI Team"
