@@ -70,6 +70,18 @@ app.add_middleware(
 )
 
 
+# ── LANGUAGE VOICE MAPS ───────────────────────────────────────────
+LANGUAGE_CONFIGS = {
+    "en": {"voice": "en-US-AriaNeural", "name": "English", "welcome": "Hello! I am your Socratic AI tutor. What would you like to learn today?"},
+    "es": {"voice": "es-ES-ElviraNeural", "name": "Spanish", "welcome": "¡Hola! Soy tu tutor de IA socrático. ¿Qué te gustaría aprender hoy?"},
+    "fr": {"voice": "fr-FR-DeniseNeural", "name": "French", "welcome": "Bonjour ! Je suis votre tuteur socratique en IA. Qu'aimeriez-vous apprendre aujourd'hui ?"},
+    "de": {"voice": "de-DE-KatjaNeural", "name": "German", "welcome": "Hallo! Ich bin dein sokratischer KI-Lehrer. Was möchtest du heute lernen?"},
+    "hi": {"voice": "hi-IN-SwararaNeural", "name": "Hindi", "welcome": "नमस्ते! मैं आपका सुकराती एआई शिक्षक हूं। आज आप क्या सीखना चाहेंगे?"},
+    "ar": {"voice": "ar-SA-ZariyahNeural", "name": "Arabic", "welcome": "مرحباً! أنا معلمك السقراطي الذكي. ماذا تريد أن تتعلم اليوم؟"},
+    "zh": {"voice": "zh-CN-XiaoxiaoNeural", "name": "Chinese", "welcome": "你好！我是 your 启发式 AI 导师。今天你想学点什么呢？"}
+}
+
+
 # ── HEALTH ────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
@@ -93,7 +105,7 @@ async def root():
     }
 
 
-# ── GENERATOR ─────────────────────────────────────────────────────
+# ── GENERATOR — DIRECT (JSON parse fix active) ────────────────────
 @app.post("/api/v1/generator/generate")
 async def generator_generate(request: Request):
     try:
@@ -229,8 +241,8 @@ async def spelling_detect(file: UploadFile = FastAPIFile(...)):
     errors = []
     try:
         from spellchecker import SpellChecker
-        spell      = SpellChecker()
-        words      = re.findall(r'\b[a-zA-Z]{3,}\b', text)
+        spell = SpellChecker()
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', text)
         misspelled = spell.unknown(words)
         seen = set()
         for word in misspelled:
@@ -247,13 +259,19 @@ async def spelling_detect(file: UploadFile = FastAPIFile(...)):
                     "confidence": 0.9,
                     "position":   {"x": 0, "y": 0},
                 })
+        logger.info(f"Spell check: {len(words)} words, {len(errors)} errors")
+    except ImportError:
+        logger.error("pyspellchecker not installed")
     except Exception as e:
         logger.error(f"Spell check error: {e}")
+
     try:
         os.remove(file_path)
     except Exception:
         pass
+
     total_words = len(text.split()) if text.strip() else 0
+
     return {
         "success": True,
         "data": {
@@ -271,7 +289,7 @@ async def spelling_detect(file: UploadFile = FastAPIFile(...)):
 
 
 # ── AUDIO HELPER: ASYNC IN-MEMORY TTS ─────────────────────────────
-async def synthesize_speech_base64(text: str, voice: str = "en-US-AriaNeural") -> str:
+async def synthesize_speech_base64(text: str, voice: str) -> str:
     """Synthesizes text to MP3 in-memory and returns a clean base64 string."""
     try:
         import edge_tts
@@ -287,27 +305,43 @@ async def synthesize_speech_base64(text: str, voice: str = "en-US-AriaNeural") -
     return ""
 
 
-# ── WEBSOCKET VOICE TUTOR (REAL-TIME STT & TTS) ───────────────────
+# ── WEBSOCKET — VOICE TUTOR (MULTILINGUAL ACTIVE) ─────────────────
 @app.websocket("/api/v1/voice-tutor/ws/{session_id}")
 async def voice_tutor_ws(websocket: WebSocket, session_id: str):
+    """WebSocket for real-time voice tutor communication with actual STT & TTS."""
+    # Retrieve language from query params
+    params = websocket.query_params
+    lang_code = params.get("language", "en")
+    if lang_code not in LANGUAGE_CONFIGS:
+        lang_code = "en"
+
+    lang_cfg = LANGUAGE_CONFIGS[lang_code]
+    voice = lang_cfg["voice"]
+    lang_name = lang_cfg["name"]
+
     await websocket.accept()
-    logger.info(f"WebSocket connected: session={session_id}")
+    logger.info(f"WebSocket connected: session={session_id} language={lang_name}")
+
+    # Ensure audio temp directories exist
+    os.makedirs("uploads/audio", exist_ok=True)
 
     try:
-        welcome_text = "Hello! I am your Socratic AI tutor. What would you like to learn today?"
-        welcome_audio = await synthesize_speech_base64(welcome_text, settings.TTS_VOICE)
+        # Initial Welcome Message via Edge-TTS in targeted language
+        welcome_text = lang_cfg["welcome"]
+        welcome_audio_base64 = await synthesize_speech_base64(welcome_text, voice)
 
         await websocket.send_json({
             "type":       "connected",
             "session_id": session_id,
             "text":       welcome_text,
-            "audio":      welcome_audio,
+            "audio":      welcome_audio_base64,
             "message":    "Voice tutor ready!",
         })
 
         while True:
+            # Receive message
             try:
-                raw = await websocket.receive_text()
+                raw  = await websocket.receive_text()
                 data = json.loads(raw)
             except json.JSONDecodeError:
                 data = {"type": "text", "text": raw}
@@ -317,6 +351,7 @@ async def voice_tutor_ws(websocket: WebSocket, session_id: str):
                 break
 
             msg_type = data.get("type", "text")
+            logger.info(f"WS received: type={msg_type} session={session_id[:8]}")
 
             if msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
@@ -324,70 +359,75 @@ async def voice_tutor_ws(websocket: WebSocket, session_id: str):
 
             question = ""
 
-            # 1. SPEECH-TO-TEXT (STT via Groq Whisper)
+            # ── 1. SPEECH-TO-TEXT (STT via Groq Whisper with Language Hint) ──
             if msg_type == "audio" and data.get("audio"):
-                logger.info("Processing voice recording via Whisper...")
-                try:
-                    # Clean base64 input
-                    audio_b64 = data["audio"]
-                    if "," in audio_b64:
-                        audio_b64 = audio_b64.split(",")[1]
-                    audio_bytes = base64.b64decode(audio_b64)
-                    audio_format = data.get("format", "wav") or "wav"
-                    
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as tmp_file:
-                        tmp_file.write(audio_bytes)
-                        tmp_path = tmp_file.name
+                logger.info(f"Processing voice recording via Whisper in {lang_name}...")
+                audio_data = base64.b64decode(data["audio"])
+                audio_format = data.get("format", "wav")
+                
+                temp_audio_path = f"uploads/audio/input_{session_id}.{audio_format}"
+                with open(temp_audio_path, "wb") as f:
+                    f.write(audio_data)
 
+                try:
                     from groq import Groq
                     groq_client = Groq(api_key=settings.GROQ_API_KEY)
-                    with open(tmp_path, "rb") as f:
+                    with open(temp_audio_path, "rb") as file_obj:
                         transcription = groq_client.audio.transcriptions.create(
-                            file=(os.path.basename(tmp_path), f.read()),
+                            file=(os.path.basename(temp_audio_path), file_obj.read()),
                             model="whisper-large-v3",
-                            response_format="json"
+                            response_format="json",
+                            language=lang_code # Force Whisper to transcribe in targeted language
                         )
-                    question = transcription.text.strip()
-                    logger.info(f"Whisper STT result: '{question}'")
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
+                    question = transcription.text
+                    logger.info(f"Whisper STT transcription ({lang_name}): '{question}'")
                 except Exception as e:
                     logger.error(f"Whisper STT failed: {e}")
                     question = ""
+                finally:
+                    if os.path.exists(temp_audio_path):
+                        os.remove(temp_audio_path)
 
             elif msg_type == "text":
-                question = str(data.get("text", data.get("message", ""))).strip()
+                question = data.get("text", data.get("message", ""))
 
             if not question:
                 continue
 
-            # Confirm transcript
+            # Confirm transcript back to browser
             await websocket.send_json({
                 "type": "transcript",
                 "text": question,
             })
 
-            # 2. SOCRATIC AI RESPONSE (LLM)
+            # ── 2. SOCRATIC AI RESPONSE (LLM in Chosen Language) ──
             try:
                 from app.shared.llm_client import llm_client
                 response_text = llm_client.simple_prompt(
-                    prompt=f"Student question: {question}\n\nRespond as a friendly Socratic AI tutor. Ask guiding questions or give hints rather than giving direct answers.",
-                    system="You are an expert Socratic AI tutor. Never give direct answers immediately. Guide with 2-3 engaging questions or hints. Under 100 words.",
-                    max_tokens=150,
+                    prompt=(
+                        f"Student question: {question}\n\n"
+                        f"Respond in {lang_name} as a Socratic AI tutor. Ask guiding questions or give hints."
+                    ),
+                    system=(
+                        f"You are an expert Socratic AI tutor. Never give direct answers. "
+                        f"Guide with hints and questions. Keep responses under 120 words. "
+                        f"STRICT: Respond ONLY in {lang_name}."
+                    ),
+                    max_tokens=200,
                     temperature=0.7,
                 )
             except Exception as e:
-                logger.warning(f"Socratic LLM failed: {e}")
-                response_text = f"That’s a great question about '{question}'. What do you think is the first key step?"
+                logger.warning(f"Socratic LLaMA failed: {e}")
+                response_text = f"That’s a great question! What do you think is the first step?"
 
-            # 3. TEXT-TO-SPEECH (In-Memory TTS Stream)
-            response_audio = await synthesize_speech_base64(response_text, settings.TTS_VOICE)
+            # ── 3. TEXT-TO-SPEECH (TTS in Chosen Language Voice) ──
+            response_audio_base64 = await synthesize_speech_base64(response_text, voice)
 
+            # Send back both Text and Voice
             await websocket.send_json({
                 "type":       "response",
                 "text":       response_text,
-                "audio":      response_audio,
+                "audio":      response_audio_base64,
                 "topic":      data.get("subject", "general"),
                 "session_id": session_id,
             })
@@ -400,11 +440,8 @@ async def voice_tutor_ws(websocket: WebSocket, session_id: str):
 
 # ── VOICE TUTOR REST ENDPOINTS ────────────────────────────────────
 @app.post("/api/v1/voice-tutor/session")
-async def voice_tutor_create_session(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
+async def voice_tutor_create_session(payload: dict = None):
+    data       = payload or {}
     session_id = str(_uuid.uuid4())
     return {
         "success": True,
@@ -480,26 +517,29 @@ async def sales_start_conversation():
 
 
 @app.post("/api/v1/sales/chat")
-async def sales_chat(request: Request):
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
+async def sales_chat(payload: dict):
     message = payload.get("message", "")
     conv_id = payload.get("conversation_id", "")
 
     try:
         from app.shared.llm_client import llm_client
         response_text = llm_client.simple_prompt(
-            prompt=f"Customer: {message}\n\nRespond as a helpful sales assistant. Recommend relevant educational products.",
-            system="You are an intelligent sales assistant for EduMind AI. Be concise, friendly and professional.",
+            prompt=(
+                f"Customer: {message}\nRespond as educational sales assistant. Recommend products.",
+                f"system: You are a sales assistant for EduMind AI. Be concise and friendly."
+            ),
             max_tokens=300,
             temperature=0.7,
         )
     except Exception as e:
-        logger.warning(f"Sales LLM fallback: {e}")
-        response_text = f"Thank you for your interest! I recommend EduPro Premium at ₹4,999/year with AI tutoring."
-
+        logger.warning(f"Sales LLM failed: {e}")
+        msg_lower = message.lower()
+        if any(w in msg_lower for w in ['budget', 'price', 'cost']):
+            response_text = "We have:\n💰 SmartLearn Basic — ₹2,499/year\n⭐ EduPro Premium — ₹4,999/year\n🏆 AcademyX — ₹7,999/year\nWhich suits you?"
+        elif any(w in msg_lower for w in ['grade', 'class', 'student']):
+            response_text = "EduPro Premium (₹4,999) is best for students:\n✓ AI tutoring\n✓ Grade-aligned curriculum\n✓ Parent dashboard\nWhich grade?"
+        else:
+            response_text = "Thank you! I recommend EduPro Premium at ₹4,999/year with AI tutoring. What is your budget and grade level?"
     return {
         "success": True,
         "data": {
@@ -553,17 +593,16 @@ async def sales_follow_up(conv_id: str):
         "data": {
             "email": (
                 "Subject: Thank you for exploring EduMind AI!\n\n"
-                "Dear Valued Customer,\n\n"
-                "Thank you for your interest today. I recommend EduPro Premium (₹4,999):\n"
-                "✓ AI-powered personalized tutoring\n"
-                "✓ Real-time progress analytics\n\n"
-                "Reply for a free demo!\n\nBest regards,\nEduMind AI Sales Team"
+                "Dear Customer,\n\n"
+                "I recommend EduPro Premium (Rs.4,999):\n"
+                "- AI tutoring\n- Analytics\n- Parent dashboard\n\n"
+                "Reply for free demo!\n\nEduMind AI Team"
             ),
             "whatsapp": (
-                "Hi! 👋 Thank you for your interest in EduMind AI! 🎓\n\n"
-                "Top pick: *EduPro Premium* — ₹4,999\n"
-                "✅ AI Tutor ✅ Analytics\n\n"
-                "Want a free demo? 😊"
+                "Hi! Thank you for your interest in EduMind AI!\n\n"
+                "Top pick: EduPro Premium - Rs.4,999\n"
+                "AI Tutor, Analytics, Parent Dashboard\n\n"
+                "Want a free demo?"
             ),
         },
         "message": "Follow-up generated",
@@ -604,12 +643,28 @@ try:
 except Exception as e:
     logger.warning(f"Evaluator router failed: {e}")
 
+logger.info("Generator using direct endpoint (JSON parse fix active)")
+
 try:
     from app.challenge3_spelling.router import router as spelling_router
     app.include_router(spelling_router)
     logger.info("Spelling router loaded")
 except Exception as e:
     logger.warning(f"Spelling router failed: {e}")
+
+try:
+    from app.challenge4_voice_tutor.router import router as voice_router
+    app.include_router(voice_router, prefix="/api/v1/voice-tutor")
+    logger.info("Voice tutor router loaded")
+except Exception as e:
+    logger.warning(f"Voice tutor router failed: {e}")
+
+try:
+    from app.challenge5_sales.router import router as sales_router
+    app.include_router(sales_router, prefix="/api/v1/sales")
+    logger.info("Sales router loaded")
+except Exception as e:
+    logger.warning(f"Sales router failed: {e}")
 
 try:
     from app.admin.router import router as admin_router
