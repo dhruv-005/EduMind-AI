@@ -179,7 +179,7 @@
 │    ROLE      │       EMAIL          │     PASSWORD      │
 ├──────────────┼──────────────────────┼───────────────────┤
 │  👨‍🎓 Student  │ demo@edumind.ai      │ demo1234          │
-│  🛡️  Admin    │ admin@edumind.ai     │ admin1234         │
+│  🛡️  Admin   │ admin@edumind.ai     │ admin1234         │
 │  👩‍🏫 Teacher  │ teacher@edumind.ai   │ teacher1234       │
 └──────────────┴──────────────────────┴───────────────────┘
 ```
